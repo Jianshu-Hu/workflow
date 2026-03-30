@@ -26,7 +26,7 @@ Keep older entries for history.
 
 PROGRESS_TEMPLATE = """# Workflow Progress
 
-This file is rewritten by Gemini after each review.
+This file is rewritten after each review.
 It should summarize the current state so a later workflow run can resume from here.
 
 ## Current Status
@@ -39,7 +39,7 @@ It should summarize the current state so a later workflow run can resume from he
 
 ## Latest Review
 
-- No Gemini review has been recorded yet.
+- No review has been recorded yet.
 
 ## Open Issues
 
@@ -61,7 +61,7 @@ PLAN_TEMPLATE = """# Workflow Plan
 
 ## Planner Notes
 
-Gemini should rewrite this file while preserving the manifest block markers above.
+The planner should rewrite this file while preserving the manifest block markers above.
 Each step should explain what to build and how success will be verified.
 """
 
@@ -82,7 +82,7 @@ def render_task_template(task_summary: str = "") -> str:
             "## Acceptance Criteria",
             "",
             "- Refine this brief with the concrete constraints, deliverables, and success criteria.",
-            "- Use `discussion.md` to capture the Gemini kickoff discussion and open questions.",
+            "- Use `discussion.md` to capture the kickoff discussion and open questions.",
         ]
     ) + "\n"
 
@@ -99,7 +99,7 @@ def render_discussion_template(task_summary: str = "") -> str:
             "",
             "## Discussion Notes",
             "",
-            "Use this file as the durable summary of the Gemini kickoff discussion.",
+            "Use this file as the durable summary of the kickoff discussion.",
             "Capture clarified goals, constraints, hypotheses, experiment ideas, decisions, and open questions here.",
         ]
     ) + "\n"
@@ -223,6 +223,81 @@ def load_yaml_file(path: Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise WorkflowError(f"Expected mapping in {path}, got {type(data).__name__}.")
     return data
+
+
+def parse_runtime_env_line(line: str) -> tuple[str, str] | None:
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        return None
+
+    if stripped.startswith("export "):
+        stripped = stripped[len("export ") :].strip()
+
+    if "=" not in stripped:
+        return None
+
+    key, value = stripped.split("=", 1)
+    key = key.strip()
+    value = value.strip()
+    if not key:
+        return None
+
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        value = value[1:-1]
+
+    return key, value
+
+
+def load_runtime_env_file(path: Path) -> None:
+    if not path.exists():
+        return
+
+    for line in path.read_text(encoding="utf-8").splitlines():
+        parsed = parse_runtime_env_line(line)
+        if parsed is None:
+            continue
+        key, value = parsed
+        os.environ.setdefault(key, value)
+
+
+def upsert_runtime_env_file(path: Path, assignments: dict[str, str]) -> None:
+    normalized = {key: value for key, value in assignments.items() if value}
+    if not normalized:
+        return
+
+    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    updated_lines: list[str] = []
+    seen: set[str] = set()
+
+    for line in lines:
+        parsed = parse_runtime_env_line(line)
+        if parsed is None:
+            updated_lines.append(line)
+            continue
+
+        key, _ = parsed
+        if key in normalized:
+            updated_lines.append(f"export {key}={shlex.quote(normalized[key])}")
+            seen.add(key)
+        else:
+            updated_lines.append(line)
+
+    missing_items = [(key, value) for key, value in normalized.items() if key not in seen]
+    if missing_items:
+        if updated_lines and updated_lines[-1].strip():
+            updated_lines.append("")
+        if not path.exists():
+            updated_lines.append("# Workflow model overrides for this workspace.")
+        for key, value in missing_items:
+            updated_lines.append(f"export {key}={shlex.quote(value)}")
+
+    path.write_text("\n".join(updated_lines).rstrip() + "\n", encoding="utf-8")
+
+
+def apply_runtime_env_overrides(assignments: dict[str, str]) -> None:
+    for key, value in assignments.items():
+        if value:
+            os.environ[key] = value
 
 
 def render_manifest(manifest: dict[str, Any]) -> str:
@@ -531,12 +606,41 @@ def clip_text(text: str, max_chars: int, *, from_end: bool = False) -> str:
     return f"{stripped[:max_chars]}\n..."
 
 
+def planner_model_name(config: dict[str, Any]) -> str:
+    return (
+        os.environ.get("WORKFLOW_PLANNER_MODEL")
+        or os.environ.get("WORKFLOW_GEMINI_MODEL")
+        or config.get("planner", {}).get("model")
+        or "gemini-3.1-pro-preview"
+    )
+
+
+def reviewer_model_name(config: dict[str, Any]) -> str:
+    return (
+        os.environ.get("WORKFLOW_REVIEWER_MODEL")
+        or config.get("reviewer", {}).get("model")
+        or os.environ.get("WORKFLOW_PLANNER_MODEL")
+        or os.environ.get("WORKFLOW_GEMINI_MODEL")
+        or config.get("planner", {}).get("model")
+        or "gemini-3.1-pro-preview"
+    )
+
+
+def discussion_model_name(config: dict[str, Any]) -> str:
+    return (
+        os.environ.get("WORKFLOW_DISCUSSION_MODEL")
+        or os.environ.get("WORKFLOW_GEMINI_DISCUSSION_MODEL")
+        or config.get("discussion", {}).get("model")
+        or planner_model_name(config)
+    )
+
+
 def build_planner_prompt(paths: WorkflowPaths, config: dict[str, Any]) -> str:
     task_text = paths.task_md.read_text(encoding="utf-8")
     discussion_text = paths.discussion_md.read_text(encoding="utf-8")
     existing_plan = paths.plan_md.read_text(encoding="utf-8")
     progress_text = paths.progress_md.read_text(encoding="utf-8")
-    model_hint = config.get("planner", {}).get("model", "Gemini Pro")
+    model_hint = planner_model_name(config)
     parent_runtime = runtime_context(paths)
 
     return f"""You are the planning agent for a coding workflow.
@@ -600,7 +704,7 @@ def build_discussion_prompt(paths: WorkflowPaths, task_summary: str = "", config
     task_text = paths.task_md.read_text(encoding="utf-8")
     discussion_text = paths.discussion_md.read_text(encoding="utf-8")
     parent_runtime = runtime_context(paths)
-    planner_model = (config or {}).get("planner", {}).get("model", "Gemini")
+    planner_model = discussion_model_name(config or {})
     summary_line = task_summary.strip() or "No short task summary was provided."
 
     return f"""You are kicking off the research discussion for a coding workflow.
@@ -862,7 +966,7 @@ def build_manifest_progress(
         current_status_lines.append("- No active step is recorded in the manifest.")
     elif active_step.get("status") == "awaiting_review":
         current_status_lines.append(
-            f"- Step `{active_step['id']}` ({active_step['title']}) completed implementation and is awaiting Gemini review."
+            f"- Step `{active_step['id']}` ({active_step['title']}) completed implementation and is awaiting review."
         )
     elif active_step.get("status") == "in_progress":
         current_status_lines.append(
@@ -887,7 +991,7 @@ def build_manifest_progress(
     else:
         review_event = latest_history_event(manifest, events={"approved", "changes_requested"})
         if review_event is None:
-            latest_review_lines = ["- No Gemini review has been recorded yet for the current workflow state."]
+            latest_review_lines = ["- No review has been recorded yet for the current workflow state."]
         else:
             approved = review_event.get("event") == "approved"
             latest_review_lines = [
@@ -994,23 +1098,41 @@ def update_state_timestamp(state_path: Path, key: str) -> None:
 
 def planner_command_config(config: dict[str, Any]) -> str:
     planner = config.get("planner", {})
-    template = os.environ.get("WORKFLOW_GEMINI_CMD") or planner.get("command_template")
+    template = (
+        os.environ.get("WORKFLOW_PLANNER_CMD")
+        or os.environ.get("WORKFLOW_GEMINI_CMD")
+        or planner.get("command_template")
+    )
     if not template:
         raise WorkflowError(
             "Planner command template is not configured. "
-            "Set planner.command_template in the config file or WORKFLOW_GEMINI_CMD."
+            "Set planner.command_template in the config file or WORKFLOW_PLANNER_CMD."
         )
     return template
 
 
 def discussion_command_config(config: dict[str, Any]) -> str:
     discussion = config.get("discussion", {})
-    template = os.environ.get("WORKFLOW_GEMINI_DISCUSSION_CMD") or discussion.get("command_template")
+    template = (
+        os.environ.get("WORKFLOW_DISCUSSION_CMD")
+        or os.environ.get("WORKFLOW_GEMINI_DISCUSSION_CMD")
+        or discussion.get("command_template")
+    )
     if not template:
         raise WorkflowError(
             "Discussion command template is not configured. "
-            "Set discussion.command_template in the config file or WORKFLOW_GEMINI_DISCUSSION_CMD."
+            "Set discussion.command_template in the config file or WORKFLOW_DISCUSSION_CMD."
         )
+    return template
+
+
+def reviewer_command_config(config: dict[str, Any]) -> str:
+    reviewer = config.get("reviewer", {})
+    template = (
+        os.environ.get("WORKFLOW_REVIEWER_CMD")
+        or reviewer.get("command_template")
+        or planner_command_config(config)
+    )
     return template
 
 
@@ -1041,6 +1163,7 @@ def run_discussion_session(paths: WorkflowPaths, config: dict[str, Any], task_su
         progress=str(paths.progress_md),
         task=str(paths.task_md),
         discussion=str(paths.discussion_md),
+        model=discussion_model_name(config),
     )
     result = run_interactive_command(command, cwd=paths.repo_root)
     if result.returncode != 0:
@@ -1070,6 +1193,7 @@ def run_progress_update(paths: WorkflowPaths, config: dict[str, Any], step: dict
             task=str(paths.task_md),
             discussion=str(paths.discussion_md),
             step_id=step["id"],
+            model=planner_model_name(config),
         )
         result = run_external_command(command, cwd=paths.root)
         if result.returncode != 0:
@@ -1136,6 +1260,7 @@ def run_planner(paths: WorkflowPaths, config: dict[str, Any]) -> None:
         progress=str(paths.progress_md),
         task=str(paths.task_md),
         discussion=str(paths.discussion_md),
+        model=planner_model_name(config),
     )
     result = run_external_command(command, cwd=paths.root)
     if result.returncode != 0:
@@ -1291,7 +1416,7 @@ def run_review(paths: WorkflowPaths, config: dict[str, Any], step_id: str | None
     write_prompt_file(prompt_path, prompt_text)
 
     command = parse_command_template(
-        planner_command_config(config),
+        reviewer_command_config(config),
         prompt_file=str(prompt_path),
         workspace=str(paths.root),
         repo_root=str(paths.repo_root),
@@ -1301,6 +1426,7 @@ def run_review(paths: WorkflowPaths, config: dict[str, Any], step_id: str | None
         task=str(paths.task_md),
         discussion=str(paths.discussion_md),
         step_id=step["id"],
+        model=reviewer_model_name(config),
     )
     result = run_external_command(command, cwd=paths.root)
     if result.returncode != 0:
@@ -1335,7 +1461,7 @@ def run_review(paths: WorkflowPaths, config: dict[str, Any], step_id: str | None
         )
     append_results_section(
         paths.results_md,
-        f"Gemini Review - {step['id']}",
+        f"Review - {step['id']}",
         "\n".join(review_body),
     )
 
@@ -1478,7 +1604,7 @@ def run_loop(
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Gemini planner / Codex executor workflow runner.")
+    parser = argparse.ArgumentParser(description="Planner / Codex executor workflow runner.")
     parser.add_argument(
         "--workspace",
         default="workflow_runs/default",
@@ -1486,7 +1612,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument(
         "--config",
-        default="workflow/config.example.yaml",
+        default="workflow/config.gemini.example.yaml",
         help="Workflow config file with planner and executor command templates.",
     )
 
@@ -1495,17 +1621,37 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     init_parser = subparsers.add_parser("init", help="Create workflow files in the workspace.")
     init_parser.add_argument("--task-summary", default="", help="Short task summary for the initial manifest.")
     init_parser.add_argument(
+        "--model",
+        default="",
+        help="Default model to persist for both planner and reviewer in this workspace.",
+    )
+    init_parser.add_argument(
+        "--planner-model",
+        default="",
+        help="Planner model to persist for this workspace. Overrides --model for planning.",
+    )
+    init_parser.add_argument(
+        "--reviewer-model",
+        default="",
+        help="Reviewer model to persist for this workspace. Overrides --model for review.",
+    )
+    init_parser.add_argument(
+        "--discussion-model",
+        default="",
+        help="Discussion model to persist for this workspace. Overrides --model for kickoff discussion.",
+    )
+    init_parser.add_argument(
         "--no-discussion",
         action="store_true",
-        help="Only initialize the workspace files; do not launch the interactive Gemini kickoff discussion.",
+        help="Only initialize the workspace files; do not launch the interactive kickoff discussion.",
     )
 
-    subparsers.add_parser("plan", help="Generate or refresh plan.md using Gemini.")
+    subparsers.add_parser("plan", help="Generate or refresh plan.md using the configured planner.")
 
     run_step_parser = subparsers.add_parser("run-step", help="Run Codex for the current or specified step.")
     run_step_parser.add_argument("--step-id", default=None, help="Explicit step id to execute.")
 
-    review_parser = subparsers.add_parser("review", help="Run Gemini review for the current or specified step.")
+    review_parser = subparsers.add_parser("review", help="Run review for the current or specified step.")
     review_parser.add_argument("--step-id", default=None, help="Explicit step id to review.")
 
     loop_parser = subparsers.add_parser("loop", help="Run the full execute-review loop until blocked or done.")
@@ -1524,27 +1670,44 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv or sys.argv[1:])
     paths = WorkflowPaths(root=Path(args.workspace).resolve())
+    load_runtime_env_file(paths.root / "runtime.env")
     config = load_yaml_file(Path(args.config).resolve())
 
     try:
         if args.command == "init":
             ensure_workflow_files(paths, task_summary=args.task_summary)
+            planner_model = args.planner_model.strip() or args.model.strip()
+            reviewer_model = args.reviewer_model.strip() or args.model.strip()
+            discussion_model = args.discussion_model.strip() or args.model.strip()
+            runtime_model_overrides = {
+                "WORKFLOW_PLANNER_MODEL": planner_model,
+                "WORKFLOW_REVIEWER_MODEL": reviewer_model,
+                "WORKFLOW_DISCUSSION_MODEL": discussion_model,
+            }
+            if any(runtime_model_overrides.values()):
+                upsert_runtime_env_file(
+                    paths.root / "runtime.env",
+                    runtime_model_overrides,
+                )
+                apply_runtime_env_overrides(runtime_model_overrides)
             print(f"Initialized workflow workspace at {paths.root}")
+            if any(runtime_model_overrides.values()):
+                print(f"Saved workspace model overrides in {paths.root / 'runtime.env'}")
             if args.no_discussion:
                 return 0
 
             if not sys.stdin.isatty() or not sys.stdout.isatty():
-                print("Interactive Gemini discussion skipped because stdin/stdout is not a TTY.")
+                print("Interactive discussion skipped because stdin/stdout is not a TTY.")
                 return 0
 
             print(
-                f"Launching Gemini kickoff discussion. Keep {paths.discussion_md.name} updated before you exit the chat."
+                f"Launching kickoff discussion. Keep {paths.discussion_md.name} updated before you exit the chat."
             )
             discussion_changed = run_discussion_session(paths, config, args.task_summary)
             if discussion_changed:
                 print(f"Updated {paths.discussion_md}")
             else:
-                print(f"Gemini discussion exited without changing {paths.discussion_md}")
+                print(f"Discussion exited without changing {paths.discussion_md}")
             return 0
 
         ensure_workflow_files(paths)

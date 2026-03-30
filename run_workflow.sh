@@ -4,7 +4,7 @@ set -euo pipefail
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 repo_root=${WORKFLOW_REPO_ROOT:-$(cd "${script_dir}/.." && pwd)}
 python_bin=${WORKFLOW_PYTHON:-python}
-config_path=${WORKFLOW_CONFIG:-${script_dir}/config.example.yaml}
+config_path=${WORKFLOW_CONFIG:-${script_dir}/config.gemini.example.yaml}
 default_workspace=${WORKFLOW_WORKSPACE:-workflow_runs/default}
 bootstrap_cmd=${WORKFLOW_BOOTSTRAP_CMD:-}
 preflight_cmd=${WORKFLOW_PREFLIGHT_CMD:-}

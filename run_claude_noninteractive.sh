@@ -17,7 +17,7 @@ case "${workflow_role}" in
     ;;
 esac
 
-gemini_model=${explicit_model:-${role_model:-${WORKFLOW_GEMINI_MODEL:-gemini-3.1-pro-preview}}}
+claude_model=${explicit_model:-${role_model:-${WORKFLOW_CLAUDE_MODEL:-sonnet}}}
 
 if [[ ! -f "${prompt_file}" ]]; then
   echo "[workflow] prompt file not found: ${prompt_file}" >&2
@@ -25,4 +25,4 @@ if [[ ! -f "${prompt_file}" ]]; then
 fi
 
 # Feed the prompt on stdin so large workflow prompts do not overflow argv.
-exec gemini -m "${gemini_model}" < "${prompt_file}"
+exec claude --print --output-format text --model "${claude_model}" < "${prompt_file}"
