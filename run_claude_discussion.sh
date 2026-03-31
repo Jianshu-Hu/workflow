@@ -18,4 +18,6 @@ fi
 echo "[workflow] launching Claude kickoff discussion from $(pwd)" >&2
 echo "[workflow] before quitting, make sure discussion.md reflects the final summary." >&2
 
-exec claude --model "${discussion_model}" "$(cat "${prompt_file}")"
+bootstrap_prompt="Read and follow the workflow kickoff instructions in ${prompt_file}. Start by opening that file, then continue the discussion interactively."
+
+exec claude --model "${discussion_model}" "${bootstrap_prompt}"

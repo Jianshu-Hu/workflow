@@ -96,6 +96,42 @@ resolve_workspace_dir() {
   fi
 }
 
+prepare_detached_workspace() {
+  local workspace_dir_local="$1"
+  local log_file="$2"
+  local pid_file="$3"
+  local archive_dir="${workspace_dir_local}/artifacts/workflow_logs"
+  local timestamp
+  local archived_log=""
+  local archived_pid=""
+  local existing_pid=""
+
+  mkdir -p "${workspace_dir_local}"
+
+  if [[ -f "${pid_file}" ]]; then
+    existing_pid="$(tr -d '[:space:]' < "${pid_file}" || true)"
+    if [[ -n "${existing_pid}" ]] && kill -0 "${existing_pid}" 2>/dev/null; then
+      return 0
+    fi
+  fi
+
+  if [[ "${WORKFLOW_APPEND_LOG:-0}" != "1" && -f "${log_file}" ]]; then
+    timestamp=$(date -u +%Y%m%dT%H%M%SZ)
+    mkdir -p "${archive_dir}"
+    archived_log="${archive_dir}/$(basename "${log_file}").${timestamp}"
+    mv "${log_file}" "${archived_log}"
+    echo "[workflow] archived previous log=${archived_log}"
+  fi
+
+  if [[ -f "${pid_file}" ]]; then
+    timestamp=${timestamp:-$(date -u +%Y%m%dT%H%M%SZ)}
+    mkdir -p "${archive_dir}"
+    archived_pid="${archive_dir}/$(basename "${pid_file}").${timestamp}"
+    mv "${pid_file}" "${archived_pid}"
+    echo "[workflow] archived stale pid=${archived_pid}"
+  fi
+}
+
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 script_path="${BASH_SOURCE[0]}"
 if command -v realpath >/dev/null 2>&1; then
@@ -124,12 +160,13 @@ if [[ "${WORKFLOW_DETACHED:-0}" != "1" && "${WORKFLOW_DETACH:-1}" == "1" ]]; the
     mkdir -p "${workspace_dir}"
     log_file=${WORKFLOW_LOG_FILE:-${workspace_dir}/workflow.output.log}
     pid_file=${WORKFLOW_PID_FILE:-${workspace_dir}/workflow.pid}
+    prepare_detached_workspace "${workspace_dir}" "${log_file}" "${pid_file}"
 
     nohup env \
       WORKFLOW_DETACHED=1 \
       WORKFLOW_LOG_FILE="${log_file}" \
       WORKFLOW_PID_FILE="${pid_file}" \
-      bash "${script_path}" "$@" >>"${log_file}" 2>&1 < /dev/null &
+      bash "${script_path}" "$@" >"${log_file}" 2>&1 < /dev/null &
     workflow_pid=$!
     printf '%s\n' "${workflow_pid}" > "${pid_file}"
 

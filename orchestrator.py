@@ -817,6 +817,24 @@ def summarize_command_failure(
     )
 
 
+def summarize_workflow_error_for_console(message: str) -> str:
+    summary = clip_history_details(message, max_chars=1200)
+    artifact_lines: list[str] = []
+    for raw_line in message.splitlines():
+        line = raw_line.strip()
+        if line.startswith("full stdout artifact:") or line.startswith("full stderr artifact:"):
+            artifact_lines.append(line)
+
+    if not artifact_lines:
+        return summary
+
+    merged_lines = [summary]
+    for line in artifact_lines:
+        if line not in merged_lines:
+            merged_lines.append(line)
+    return "\n".join(merged_lines)
+
+
 def clip_history_details(details: str, *, max_chars: int = MANIFEST_HISTORY_DETAIL_CHARS) -> str:
     stripped = details.strip()
     if not stripped:
@@ -1960,7 +1978,10 @@ def main(argv: list[str] | None = None) -> int:
             print(workflow_status(paths))
             return 0
     except WorkflowError as exc:
-        print(f"Workflow error: {exc}", file=sys.stderr)
+        print(
+            f"Workflow error: {summarize_workflow_error_for_console(str(exc))}",
+            file=sys.stderr,
+        )
         return 1
     except KeyboardInterrupt:
         print("Workflow interrupted.", file=sys.stderr)
