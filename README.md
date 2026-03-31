@@ -5,8 +5,17 @@ This workflow runs a simple loop:
 1. A planner writes `plan.md`.
 2. Codex executes one step.
 3. A reviewer approves or rejects it.
-4. The planner updates `progress.md`.
+4. The orchestrator writes a compact `progress.md`.
 5. The loop continues until done.
+
+## File Roles
+
+- `plan.md`: operational plan. Completed steps are summarized; the current and upcoming steps stay detailed.
+- `progress.md`: compact resume note. It should contain only status, blockers, decisive evidence, and the next action.
+- `results.md`: append-only execution and review journal.
+- `artifacts/`: bulky command output and other raw evidence that should not live in workflow state files.
+
+The workflow runner now enforces this structure so `plan.md` and `progress.md` do not grow without bound.
 
 ## Configs
 
@@ -87,9 +96,10 @@ python workflow/orchestrator.py --workspace workflow_runs/my-task --config workf
 
 - `task.md`: task brief
 - `discussion.md`: kickoff discussion summary
-- `plan.md`: planner output plus workflow manifest
-- `results.md`: execution and review log
-- `progress.md`: resume checkpoint
+- `plan.md`: generated workflow plan plus compact manifest-backed overview
+- `results.md`: append-only execution and review log
+- `progress.md`: deterministic resume checkpoint
+- `artifacts/`: raw logs and failure artifacts
 - `runtime.env`: per-workspace model overrides
 
 ## Wrappers

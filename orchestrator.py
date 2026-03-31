@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import dataclasses
 import json
 import os
@@ -64,6 +65,17 @@ PLAN_TEMPLATE = """# Workflow Plan
 The planner should rewrite this file while preserving the manifest block markers above.
 Each step should explain what to build and how success will be verified.
 """
+
+COMMAND_FAILURE_STDOUT_CHARS = 4000
+COMMAND_FAILURE_STDERR_CHARS = 12000
+MANIFEST_HISTORY_PROMPT_ENTRIES = 12
+MANIFEST_HISTORY_DETAIL_CHARS = 2000
+MANIFEST_HISTORY_SAVE_ENTRIES = 40
+PLAN_PROMPT_CHARS = 32000
+PROGRESS_PROMPT_CHARS = 12000
+RESULTS_PROMPT_CHARS = 24000
+APPROVED_STEP_SUMMARY_CHARS = 500
+RESULTS_SUMMARY_CHARS = 400
 
 
 def render_task_template(task_summary: str = "") -> str:
@@ -140,6 +152,14 @@ class WorkflowPaths:
     @property
     def prompts_dir(self) -> Path:
         return self.root / "prompts"
+
+    @property
+    def artifacts_dir(self) -> Path:
+        return self.root / "artifacts"
+
+    @property
+    def command_artifacts_dir(self) -> Path:
+        return self.artifacts_dir / "command_failures"
 
 
 @dataclasses.dataclass
@@ -313,6 +333,107 @@ def render_manifest(manifest: dict[str, Any]) -> str:
     )
 
 
+def step_label(step: dict[str, Any]) -> str:
+    return f"`{step['id']}` - {step['title']}"
+
+
+def summarize_step_review(step: dict[str, Any]) -> str:
+    review_summary = step.get("review_summary")
+    if isinstance(review_summary, str) and review_summary.strip():
+        return clip_text(review_summary.strip(), APPROVED_STEP_SUMMARY_CHARS, from_end=True)
+    return "No review summary recorded."
+
+
+def render_step_summary(step: dict[str, Any]) -> list[str]:
+    lines = [f"- {step_label(step)} [{step.get('status', 'pending')}]"]
+    if step.get("status") == "approved":
+        lines.append(f"  Review: {summarize_step_review(step)}")
+    elif step.get("status") == "done":
+        lines.append("  Completed.")
+    elif step.get("status") == "needs_changes":
+        lines.append("  Needs changes before the workflow can continue.")
+    return lines
+
+
+def render_step_detail(step: dict[str, Any]) -> str:
+    implementation_lines = [f"- {item}" for item in step.get("implementation", [])] or ["- None recorded."]
+    verification_lines = [f"- {item}" for item in step.get("verification", [])] or ["- None recorded."]
+    objective = str(step.get("objective", "")).strip() or "No objective recorded."
+    return "\n".join(
+        [
+            f"### Step {step_label(step)}",
+            "",
+            f"- Status: `{step.get('status', 'pending')}`",
+            "",
+            "Objective:",
+            objective,
+            "",
+            "Implementation:",
+            *implementation_lines,
+            "",
+            "Verification:",
+            *verification_lines,
+        ]
+    )
+
+
+def render_plan_document(manifest: dict[str, Any]) -> str:
+    approved_steps = [step for step in manifest.get("steps", []) if step.get("status") in {"approved", "done"}]
+    active_step = next(
+        (
+            step
+            for step in manifest.get("steps", [])
+            if step.get("status") in {"in_progress", "needs_changes", "awaiting_review"}
+        ),
+        None,
+    )
+    if active_step is None:
+        active_step = next((step for step in manifest.get("steps", []) if step.get("status") == "pending"), None)
+    upcoming_steps = [
+        step
+        for step in manifest.get("steps", [])
+        if step is not active_step and step.get("status") in {"pending", "needs_changes", "in_progress", "awaiting_review"}
+    ]
+
+    sections = [
+        "# Workflow Plan",
+        "",
+        render_manifest(manifest),
+        "",
+        "## Workflow Summary",
+        "",
+        f"- Task: {manifest.get('task') or '(not set)'}",
+        f"- Workflow status: `{manifest.get('status', 'unknown')}`",
+        f"- Current step: `{manifest.get('current_step') or 'none'}`",
+        "",
+        "## Completed Steps",
+        "",
+    ]
+    if approved_steps:
+        for step in approved_steps:
+            sections.extend(render_step_summary(step))
+    else:
+        sections.append("- None yet.")
+
+    sections.extend(["", "## Current Step", ""])
+    if active_step is not None:
+        sections.append(render_step_detail(active_step))
+    else:
+        sections.append("No active step is recorded.")
+
+    sections.extend(["", "## Upcoming Steps", ""])
+    if upcoming_steps:
+        for index, step in enumerate(upcoming_steps):
+            if index:
+                sections.extend(["", render_step_detail(step)])
+            else:
+                sections.append(render_step_detail(step))
+    else:
+        sections.append("No upcoming steps are recorded.")
+
+    return "\n".join(sections).rstrip() + "\n"
+
+
 def create_default_manifest(task_summary: str = "") -> dict[str, Any]:
     return {
         "task": task_summary,
@@ -327,6 +448,8 @@ def create_default_manifest(task_summary: str = "") -> dict[str, Any]:
 def ensure_workflow_files(paths: WorkflowPaths, task_summary: str = "") -> None:
     paths.root.mkdir(parents=True, exist_ok=True)
     paths.prompts_dir.mkdir(parents=True, exist_ok=True)
+    paths.artifacts_dir.mkdir(parents=True, exist_ok=True)
+    paths.command_artifacts_dir.mkdir(parents=True, exist_ok=True)
 
     if not paths.task_md.exists():
         paths.task_md.write_text(render_task_template(task_summary), encoding="utf-8")
@@ -336,10 +459,7 @@ def ensure_workflow_files(paths: WorkflowPaths, task_summary: str = "") -> None:
 
     if not paths.plan_md.exists():
         manifest = create_default_manifest(task_summary=task_summary)
-        paths.plan_md.write_text(
-            PLAN_TEMPLATE.format(manifest_block=render_manifest(manifest)),
-            encoding="utf-8",
-        )
+        paths.plan_md.write_text(render_plan_document(manifest), encoding="utf-8")
 
     if not paths.results_md.exists():
         paths.results_md.write_text(RESULTS_HEADER + "\n", encoding="utf-8")
@@ -447,12 +567,38 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
             raise WorkflowError(f"Step {step_id} verification must be a list.")
 
 
+def compact_manifest_for_storage(manifest: dict[str, Any]) -> dict[str, Any]:
+    compact = copy.deepcopy(manifest)
+
+    history = compact.get("history")
+    if isinstance(history, list):
+        trimmed_history = history[-MANIFEST_HISTORY_SAVE_ENTRIES:]
+        for entry in trimmed_history:
+            if isinstance(entry, dict) and isinstance(entry.get("details"), str):
+                entry["details"] = clip_history_details(entry["details"])
+        compact["history"] = trimmed_history
+
+    for step in compact.get("steps", []):
+        if not isinstance(step, dict):
+            continue
+        status = step.get("status")
+        if isinstance(step.get("review_summary"), str):
+            step["review_summary"] = clip_text(step["review_summary"], APPROVED_STEP_SUMMARY_CHARS, from_end=True)
+        if status in {"approved", "done"}:
+            step["implementation"] = []
+            step["verification"] = []
+            objective = str(step.get("objective", "")).strip()
+            if objective:
+                step["objective"] = clip_text(objective, RESULTS_SUMMARY_CHARS)
+    return compact
+
+
 def save_plan_manifest(plan_path: Path, manifest: dict[str, Any], plan_text: str) -> None:
-    validate_manifest(manifest)
-    manifest["updated_at"] = utc_now()
-    _, start, end = extract_manifest_block(plan_text)
-    updated_text = plan_text[:start] + render_manifest(manifest) + plan_text[end:]
-    plan_path.write_text(updated_text, encoding="utf-8")
+    del plan_text
+    compact_manifest = compact_manifest_for_storage(manifest)
+    validate_manifest(compact_manifest)
+    compact_manifest["updated_at"] = utc_now()
+    plan_path.write_text(render_plan_document(compact_manifest), encoding="utf-8")
 
 
 def get_step(manifest: dict[str, Any], step_id: str) -> dict[str, Any]:
@@ -606,6 +752,116 @@ def clip_text(text: str, max_chars: int, *, from_end: bool = False) -> str:
     return f"{stripped[:max_chars]}\n..."
 
 
+def clipped_or_placeholder(text: str, max_chars: int, *, from_end: bool = False) -> str:
+    stripped = text.strip()
+    if not stripped:
+        return "(empty)"
+    return clip_text(stripped, max_chars, from_end=from_end)
+
+
+def format_command_failure(
+    message: str,
+    result: subprocess.CompletedProcess[str],
+    *,
+    stdout_chars: int = COMMAND_FAILURE_STDOUT_CHARS,
+    stderr_chars: int = COMMAND_FAILURE_STDERR_CHARS,
+) -> str:
+    stdout_text = clipped_or_placeholder(result.stdout, stdout_chars, from_end=True)
+    stderr_text = clipped_or_placeholder(result.stderr, stderr_chars, from_end=True)
+    return (
+        f"{message}\n"
+        f"stdout (clipped):\n{stdout_text}\n\n"
+        f"stderr (clipped):\n{stderr_text}"
+    )
+
+
+def write_command_failure_artifacts(
+    paths: WorkflowPaths,
+    *,
+    stage: str,
+    result: subprocess.CompletedProcess[str],
+    step_id: str | None = None,
+) -> tuple[Path, Path]:
+    paths.command_artifacts_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    name_parts = [timestamp, stage]
+    if step_id:
+        name_parts.append(step_id)
+    base_name = "_".join(name_parts)
+    stdout_path = paths.command_artifacts_dir / f"{base_name}.stdout.txt"
+    stderr_path = paths.command_artifacts_dir / f"{base_name}.stderr.txt"
+    stdout_path.write_text(result.stdout, encoding="utf-8")
+    stderr_path.write_text(result.stderr, encoding="utf-8")
+    return stdout_path, stderr_path
+
+
+def summarize_command_failure(
+    paths: WorkflowPaths,
+    *,
+    stage: str,
+    message: str,
+    result: subprocess.CompletedProcess[str],
+    step_id: str | None = None,
+) -> str:
+    stdout_path, stderr_path = write_command_failure_artifacts(
+        paths,
+        stage=stage,
+        result=result,
+        step_id=step_id,
+    )
+    formatted = format_command_failure(message, result)
+    return (
+        f"{formatted}\n\n"
+        f"full stdout artifact: {stdout_path}\n"
+        f"full stderr artifact: {stderr_path}"
+    )
+
+
+def clip_history_details(details: str, *, max_chars: int = MANIFEST_HISTORY_DETAIL_CHARS) -> str:
+    stripped = details.strip()
+    if not stripped:
+        return "(empty)"
+    if "Input exceeds the maximum length of 1048576 characters." in stripped:
+        return "Executor prompt exceeded the 1,048,576-character input limit."
+    if len(stripped) <= max_chars:
+        return stripped
+
+    lines = [line.strip() for line in stripped.splitlines() if line.strip()]
+    summary_lines: list[str] = []
+    if lines:
+        summary_lines.append(lines[0])
+
+    error_line = next(
+        (line for line in reversed(lines) if "error" in line.lower() or "failed" in line.lower()),
+        "",
+    )
+    if error_line and error_line not in summary_lines:
+        summary_lines.extend(["...", error_line])
+
+    if summary_lines:
+        summary = "\n".join(summary_lines)
+        if len(summary) <= max_chars:
+            return summary
+
+    return clip_text(stripped, max_chars, from_end=True)
+
+
+def compact_manifest_for_prompt(manifest: dict[str, Any]) -> dict[str, Any]:
+    compact = copy.deepcopy(manifest)
+    history = compact.get("history")
+    if isinstance(history, list):
+        compact["history"] = history[-MANIFEST_HISTORY_PROMPT_ENTRIES:]
+        for entry in compact["history"]:
+            if isinstance(entry, dict) and isinstance(entry.get("details"), str):
+                entry["details"] = clip_history_details(entry["details"])
+
+    for step in compact.get("steps", []):
+        if isinstance(step, dict) and isinstance(step.get("review_summary"), str):
+            step["review_summary"] = clip_text(step["review_summary"], 1000, from_end=True)
+
+    return compact
+
+
 def planner_model_name(config: dict[str, Any]) -> str:
     return (
         os.environ.get("WORKFLOW_PLANNER_MODEL")
@@ -638,8 +894,8 @@ def discussion_model_name(config: dict[str, Any]) -> str:
 def build_planner_prompt(paths: WorkflowPaths, config: dict[str, Any]) -> str:
     task_text = paths.task_md.read_text(encoding="utf-8")
     discussion_text = paths.discussion_md.read_text(encoding="utf-8")
-    existing_plan = paths.plan_md.read_text(encoding="utf-8")
-    progress_text = paths.progress_md.read_text(encoding="utf-8")
+    existing_plan = clip_text(paths.plan_md.read_text(encoding="utf-8"), PLAN_PROMPT_CHARS, from_end=True)
+    progress_text = clip_text(paths.progress_md.read_text(encoding="utf-8"), PROGRESS_PROMPT_CHARS, from_end=True)
     model_hint = planner_model_name(config)
     parent_runtime = runtime_context(paths)
 
@@ -661,6 +917,10 @@ Requirements:
 - If this is the first plan, set manifest.current_step to the first step id and manifest.status to pending.
 - If this is a replan, preserve approved steps and set manifest.current_step / manifest.status to the next actionable step instead of restarting from the beginning.
 - Keep the human-readable sections below the manifest in sync with the manifest.
+- Treat `plan.md` as an operational plan, not an archive.
+- Keep completed steps summarized. Do not include long retrospectives, command transcripts, diffs, or raw logs for finished steps.
+- Keep the current step and pending future steps concrete and detailed enough to execute.
+- If detailed evidence matters, reference `results.md` or workflow artifacts instead of embedding bulk output in the plan.
 - Do not mark any step approved before review.
 - Inspect {paths.progress_md.name} and continue from the latest recorded workflow state instead of restarting completed work.
 - If the existing manifest and {paths.progress_md.name} disagree, prefer the more recent concrete execution evidence in {paths.results_md.name} and reconcile the plan.
@@ -754,7 +1014,12 @@ def build_codex_prompt(
 ) -> str:
     verification_lines = "\n".join(f"- {item}" for item in step.get("verification", [])) or "- None listed"
     implementation_lines = "\n".join(f"- {item}" for item in step.get("implementation", [])) or "- No implementation notes provided"
-    progress_text = paths.progress_md.read_text(encoding="utf-8")
+    progress_text = clip_text(paths.progress_md.read_text(encoding="utf-8"), PROGRESS_PROMPT_CHARS, from_end=True)
+    manifest_text = yaml.safe_dump(
+        compact_manifest_for_prompt(manifest),
+        sort_keys=False,
+        allow_unicode=False,
+    ).strip()
     parent_runtime = runtime_context(paths)
     return f"""Implement exactly one approved workflow step in this repository.
 
@@ -804,15 +1069,16 @@ Current workflow progress:
 
 Current workflow manifest:
 ```yaml
-{yaml.safe_dump(manifest, sort_keys=False, allow_unicode=False).strip()}
+{manifest_text}
 ```
 """
 
 
 def build_review_prompt(paths: WorkflowPaths, step: dict[str, Any]) -> str:
-    plan_text = paths.plan_md.read_text(encoding="utf-8")
-    results_text = paths.results_md.read_text(encoding="utf-8")
-    progress_text = paths.progress_md.read_text(encoding="utf-8")
+    manifest, _ = load_plan_manifest(paths.plan_md)
+    plan_text = yaml.safe_dump(compact_manifest_for_prompt(manifest), sort_keys=False, allow_unicode=False).strip()
+    results_text = clip_text(paths.results_md.read_text(encoding="utf-8"), RESULTS_PROMPT_CHARS, from_end=True)
+    progress_text = clip_text(paths.progress_md.read_text(encoding="utf-8"), PROGRESS_PROMPT_CHARS, from_end=True)
     parent_runtime = runtime_context(paths)
     return f"""You are the review gate for a coding workflow.
 
@@ -873,6 +1139,9 @@ Rewrite {paths.progress_md.name} so a future run can resume from the latest stat
 Requirements:
 - Return the full contents of {paths.progress_md.name} only. No surrounding explanation.
 - Base the summary on the current task, plan, results, and latest review outcome.
+- Keep {paths.progress_md.name} compact. It is a handoff note, not an archive.
+- Include only current status, completed steps, open issues, decisive evidence, and next action.
+- Never copy full logs, prompts, manifests, or long command output into {paths.progress_md.name}.
 - Keep the document concise but specific.
 - Include these sections in order:
   1. # Workflow Progress
@@ -997,7 +1266,7 @@ def build_manifest_progress(
             latest_review_lines = [
                 f"- **Step:** `{review_event.get('step_id', 'unknown')}`",
                 f"- **Approved:** `{str(approved).lower()}`",
-                f"- **Rationale:** {review_event.get('details', 'No review summary recorded.')}",
+                f"- **Rationale:** {clip_history_details(review_event.get('details', 'No review summary recorded.'))}",
             ]
 
     open_issues: list[str] = []
@@ -1016,7 +1285,7 @@ def build_manifest_progress(
             latest_failure = latest_history_event(manifest, step_id=active_step["id"])
             details = latest_failure.get("details") if latest_failure else None
             if details:
-                open_issues.append(f"- {details}")
+                open_issues.append(f"- {clip_history_details(details)}")
     if not open_issues:
         open_issues.append("- None recorded.")
 
@@ -1175,74 +1444,11 @@ def run_discussion_session(paths: WorkflowPaths, config: dict[str, Any], task_su
 
 
 def run_progress_update(paths: WorkflowPaths, config: dict[str, Any], step: dict[str, Any], review: StepResult) -> None:
-    prompt_text = build_progress_prompt(paths, step, review)
-    prompt_path = paths.prompts_dir / f"progress_{step['id']}.txt"
-    write_prompt_file(prompt_path, prompt_text)
-
-    fallback_reason: str | None = None
-    result: subprocess.CompletedProcess[str] | None = None
-    try:
-        command = parse_command_template(
-            planner_command_config(config),
-            prompt_file=str(prompt_path),
-            workspace=str(paths.root),
-            repo_root=str(paths.repo_root),
-            plan=str(paths.plan_md),
-            results=str(paths.results_md),
-            progress=str(paths.progress_md),
-            task=str(paths.task_md),
-            discussion=str(paths.discussion_md),
-            step_id=step["id"],
-            model=planner_model_name(config),
-        )
-        result = run_external_command(command, cwd=paths.root)
-        if result.returncode != 0:
-            fallback_reason = (
-                "Progress summarizer command failed.\n"
-                f"stdout:\n{result.stdout}\n\nstderr:\n{result.stderr}"
-            )
-        else:
-            progress_output = result.stdout.strip()
-            if not progress_output:
-                fallback_reason = "The planner command returned empty stdout during progress checkpoint generation."
-            elif not progress_output.lstrip().startswith("# Workflow Progress"):
-                fallback_reason = (
-                    "The planner command returned output that did not start with '# Workflow Progress', "
-                    "so a deterministic checkpoint was written instead."
-                )
-    except WorkflowError as exc:
-        fallback_reason = str(exc)
-
-    if fallback_reason is not None:
-        progress_output = build_manifest_progress(
-            paths,
-            latest_step=step,
-            review=review,
-            progress_error=fallback_reason,
-        )
-        append_results_section(
-            paths.results_md,
-            f"Progress Fallback - {step['id']}",
-            "\n".join(
-                [
-                    "Summary:",
-                    "The orchestrator wrote a deterministic progress checkpoint because the planner-based progress update was unavailable or invalid.",
-                    "A deterministic fallback progress.md was written from the manifest and latest review so the workflow can continue.",
-                    "",
-                    "Fallback reason:",
-                    "```text",
-                    fallback_reason,
-                    "```",
-                    "",
-                    "Planner stderr:",
-                    "```text",
-                    (result.stderr.strip() if result is not None else "") or "(empty)",
-                    "```",
-                ]
-            ),
-        )
-
-    write_progress_snapshot(paths, progress_output)
+    del config
+    write_progress_snapshot(
+        paths,
+        build_manifest_progress(paths, latest_step=step, review=review),
+    )
 
 
 def run_planner(paths: WorkflowPaths, config: dict[str, Any]) -> None:
@@ -1265,18 +1471,26 @@ def run_planner(paths: WorkflowPaths, config: dict[str, Any]) -> None:
     result = run_external_command(command, cwd=paths.root)
     if result.returncode != 0:
         raise WorkflowError(
-            "Planner command failed.\n"
-            f"stdout:\n{result.stdout}\n\nstderr:\n{result.stderr}"
+            summarize_command_failure(
+                paths,
+                stage="planner",
+                message="Planner command failed.",
+                result=result,
+            )
         )
 
     planner_output = result.stdout.strip()
     if not planner_output:
         raise WorkflowError("Planner command returned empty output.")
 
-    paths.plan_md.write_text(planner_output + "\n", encoding="utf-8")
-    manifest, _ = load_plan_manifest(paths.plan_md)
+    manifest_text, _, _ = extract_manifest_block(planner_output)
+    manifest = yaml.safe_load(manifest_text) or {}
+    if not isinstance(manifest, dict):
+        raise WorkflowError("Planner output did not contain a valid manifest mapping.")
+    validate_manifest(manifest)
     if not manifest["steps"]:
         raise WorkflowError("Planner did not populate any steps in the manifest.")
+    save_plan_manifest(paths.plan_md, manifest, planner_output)
 
     update_state_timestamp(paths.state_json, "last_planner_run_at")
     append_results_section(
@@ -1324,21 +1538,25 @@ def run_executor(paths: WorkflowPaths, config: dict[str, Any], step_id: str | No
     )
     result = run_external_command(command, cwd=paths.repo_root)
     if result.returncode != 0:
+        failure_summary = summarize_command_failure(
+            paths,
+            stage="executor",
+            message="Executor command failed.",
+            result=result,
+            step_id=step["id"],
+        )
         mark_step_status(
             paths.plan_md,
             step["id"],
             "needs_changes",
             event="executor_failed",
-            details=result.stderr.strip() or "Executor command failed.",
+            details=clip_history_details(failure_summary),
         )
         write_progress_snapshot(
             paths,
             build_manifest_progress(paths, latest_step=step),
         )
-        raise WorkflowError(
-            "Executor command failed.\n"
-            f"stdout:\n{result.stdout}\n\nstderr:\n{result.stderr}"
-        )
+        raise WorkflowError(failure_summary)
 
     mark_step_status(
         paths.plan_md,
@@ -1431,8 +1649,13 @@ def run_review(paths: WorkflowPaths, config: dict[str, Any], step_id: str | None
     result = run_external_command(command, cwd=paths.root)
     if result.returncode != 0:
         raise WorkflowError(
-            "Reviewer command failed.\n"
-            f"stdout:\n{result.stdout}\n\nstderr:\n{result.stderr}"
+            summarize_command_failure(
+                paths,
+                stage="reviewer",
+                message="Reviewer command failed.",
+                result=result,
+                step_id=step["id"],
+            )
         )
 
     review = parse_review_json(result.stdout)
