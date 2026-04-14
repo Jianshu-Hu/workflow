@@ -34,7 +34,7 @@ python workflow/orchestrator.py \
   --config workflow/config.gemini.example.yaml \
   init \
   --task-summary "Build feature X" \
-  --model gemini-2.5-pro
+  --model gemini-3.1-pro-preview
 ```
 
 Claude:
@@ -47,6 +47,11 @@ python workflow/orchestrator.py \
   --task-summary "Build feature X" \
   --model sonnet
 ```
+
+During `init`, the workflow asks for related links to save in `task.md`.
+Enter one link per line, press Enter on an empty line when finished, or type `none` to skip.
+For scripted use, pass `--related-link` multiple times instead of using the prompt.
+The kickoff discussion saves raw `artifacts/discussion_input.log` and `artifacts/discussion_output.log`, then generates a normalized `artifacts/discussion_transcript.txt` with extracted user/assistant turns. `discussion.md` is regenerated from that normalized transcript after the interactive session ends.
 
 Then run:
 
@@ -76,6 +81,8 @@ python workflow/orchestrator.py \
   --config workflow/config.claude.example.yaml \
   init \
   --task-summary "Build feature X" \
+  --related-link https://github.com/example/project \
+  --related-link https://arxiv.org/abs/1234.5678 \
   --planner-model sonnet \
   --reviewer-model opus \
   --discussion-model sonnet

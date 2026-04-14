@@ -16,8 +16,24 @@ if [[ ! -t 0 || ! -t 1 ]]; then
 fi
 
 echo "[workflow] launching kickoff discussion from $(pwd)" >&2
-echo "[workflow] before quitting, make sure discussion.md reflects the final summary." >&2
+echo "[workflow] transcript will be saved for later discussion summarization." >&2
 
-bootstrap_prompt="Read and follow the workflow kickoff instructions in ${prompt_file}. Start by opening that file, then continue the discussion interactively."
+prompt_dir=$(cd "$(dirname "${prompt_file}")" && pwd)
+workspace_root=$(cd "${prompt_dir}/.." && pwd)
+artifacts_dir="${workspace_root}/artifacts"
+input_log="${artifacts_dir}/discussion_input.log"
+output_log="${artifacts_dir}/discussion_output.log"
+mkdir -p "${artifacts_dir}"
+: > "${input_log}"
+: > "${output_log}"
 
-exec gemini -m "${discussion_model}" --prompt-interactive "${bootstrap_prompt}"
+bootstrap_prompt=$(<"${prompt_file}")
+cmd=(gemini -m "${discussion_model}" --prompt-interactive "${bootstrap_prompt}")
+
+if ! command -v script >/dev/null 2>&1; then
+  echo "[workflow] 'script' is required to capture the discussion transcript." >&2
+  exit 1
+fi
+
+command_string=$(printf '%q ' "${cmd[@]}")
+exec script -qef -E never -I "${input_log}" -O "${output_log}" -c "${command_string}"

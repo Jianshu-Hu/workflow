@@ -76,12 +76,61 @@ PROGRESS_PROMPT_CHARS = 12000
 RESULTS_PROMPT_CHARS = 24000
 APPROVED_STEP_SUMMARY_CHARS = 500
 RESULTS_SUMMARY_CHARS = 400
+DISCUSSION_TRANSCRIPT_PROMPT_CHARS = 60000
 
 
-def render_task_template(task_summary: str = "") -> str:
+def normalize_related_links(related_links: list[str] | None) -> list[str]:
+    if not related_links:
+        return []
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in related_links:
+        value = item.strip()
+        if not value or value.lower() == "none" or value in seen:
+            continue
+        normalized.append(value)
+        seen.add(value)
+    return normalized
+
+
+def prompt_for_related_links() -> list[str]:
+    print("Add related links for this workflow, one per line.")
+    print("Supported examples: GitHub repos, arXiv papers, local file paths.")
+    print("Press Enter on an empty line when finished, or type 'none' to skip.")
+    links: list[str] = []
+    while True:
+        try:
+            response = input("Related link: ").strip()
+        except EOFError:
+            print()
+            break
+        if not response:
+            break
+        if response.lower() == "none":
+            return []
+        links.append(response)
+    return normalize_related_links(links)
+
+
+def render_task_template(task_summary: str = "", related_links: list[str] | None = None) -> str:
     summary = task_summary.strip()
+    normalized_links = normalize_related_links(related_links)
     if not summary:
-        return "# Task\n\nDescribe the goal, constraints, and acceptance criteria here.\n"
+        sections = [
+            "# Task",
+            "",
+            "Describe the goal, constraints, and acceptance criteria here.",
+        ]
+        if normalized_links:
+            sections.extend(
+                [
+                    "",
+                    "## Related Links",
+                    "",
+                    *[f"- {item}" for item in normalized_links],
+                ]
+            )
+        return "\n".join(sections) + "\n"
 
     return "\n".join(
         [
@@ -90,6 +139,10 @@ def render_task_template(task_summary: str = "") -> str:
             "## Summary",
             "",
             summary,
+            "",
+            "## Related Links",
+            "",
+            *([f"- {item}" for item in normalized_links] or ["- None provided."]),
             "",
             "## Acceptance Criteria",
             "",
@@ -109,10 +162,33 @@ def render_discussion_template(task_summary: str = "") -> str:
             "",
             summary,
             "",
-            "## Discussion Notes",
+            "## Problem Statement",
             "",
-            "Use this file as the durable summary of the kickoff discussion.",
-            "Capture clarified goals, constraints, hypotheses, experiment ideas, decisions, and open questions here.",
+            "Clarify the problem to solve and the intended deliverable.",
+            "",
+            "## Constraints",
+            "",
+            "- None recorded yet.",
+            "",
+            "## Current Understanding",
+            "",
+            "- None recorded yet.",
+            "",
+            "## Promising Directions",
+            "",
+            "- None recorded yet.",
+            "",
+            "## Rejected Ideas",
+            "",
+            "- None recorded yet.",
+            "",
+            "## Open Questions",
+            "",
+            "- None recorded yet.",
+            "",
+            "## Next Actions",
+            "",
+            "- Continue the kickoff discussion. This summary will be refreshed from the discussion transcript after the session.",
         ]
     ) + "\n"
 
@@ -160,6 +236,18 @@ class WorkflowPaths:
     @property
     def command_artifacts_dir(self) -> Path:
         return self.artifacts_dir / "command_failures"
+
+    @property
+    def discussion_transcript(self) -> Path:
+        return self.artifacts_dir / "discussion_transcript.txt"
+
+    @property
+    def discussion_input_log(self) -> Path:
+        return self.artifacts_dir / "discussion_input.log"
+
+    @property
+    def discussion_output_log(self) -> Path:
+        return self.artifacts_dir / "discussion_output.log"
 
 
 @dataclasses.dataclass
@@ -445,14 +533,21 @@ def create_default_manifest(task_summary: str = "") -> dict[str, Any]:
     }
 
 
-def ensure_workflow_files(paths: WorkflowPaths, task_summary: str = "") -> None:
+def ensure_workflow_files(
+    paths: WorkflowPaths,
+    task_summary: str = "",
+    related_links: list[str] | None = None,
+) -> None:
     paths.root.mkdir(parents=True, exist_ok=True)
     paths.prompts_dir.mkdir(parents=True, exist_ok=True)
     paths.artifacts_dir.mkdir(parents=True, exist_ok=True)
     paths.command_artifacts_dir.mkdir(parents=True, exist_ok=True)
 
     if not paths.task_md.exists():
-        paths.task_md.write_text(render_task_template(task_summary), encoding="utf-8")
+        paths.task_md.write_text(
+            render_task_template(task_summary, related_links=related_links),
+            encoding="utf-8",
+        )
 
     if not paths.discussion_md.exists():
         paths.discussion_md.write_text(render_discussion_template(task_summary), encoding="utf-8")
@@ -987,18 +1082,24 @@ def build_discussion_prompt(paths: WorkflowPaths, task_summary: str = "", config
 
     return f"""You are kicking off the research discussion for a coding workflow.
 
-Use this interactive session to help the user think through the problem before any implementation plan is generated.
+Your job in this session is to help the user scope the work before planning begins.
+This session is for clarification and durable note-taking, not for solving the task end-to-end.
+The workflow will save the raw chat transcript and later summarize it into `{paths.discussion_md.name}` automatically.
+Do not claim that you edited `{paths.discussion_md.name}` yourself.
 Work in a conversational style: clarify the goal, ask targeted follow-up questions, challenge weak assumptions, and help the user converge on a well-scoped approach.
 
 Session requirements:
 - Start by restating the current task summary and asking the user what research problem or implementation goal they want to solve.
+- Your first substantive reply must contain at least one targeted follow-up question for the user.
+- Do not reply with only a promise like "I’ll read/open/update/check this". If you take an action, report the result briefly after the action.
+- Do not treat this session as an execution task, implementation task, or autonomous research run. The primary deliverable here is a useful discussion transcript that can be summarized into `{paths.discussion_md.name}` plus clarified open questions and next actions.
 - Use the chat to explore goals, constraints, prior attempts, risks, candidate approaches, evaluation criteria, and unknowns.
-- Treat `{paths.discussion_md}` as the durable summary for later workflow runs.
-- Keep `{paths.discussion_md.name}` updated during the conversation whenever material conclusions are reached, and make sure it is up to date before the user quits the chat.
-- Organize `{paths.discussion_md.name}` around: problem statement, constraints, current understanding, promising directions, rejected ideas, open questions, and next actions.
 - Do not generate or rewrite `{paths.plan_md.name}` in this kickoff discussion.
-- If the user wants codebase-specific grounding, inspect the repository as needed before making strong claims.
-- Assume the later planner/reviewer stages will read `{paths.task_md.name}` and `{paths.discussion_md.name}` verbatim.
+- If the user wants codebase-specific grounding, inspect the repository as needed before making strong claims, but keep that inspection narrowly scoped to informing the discussion.
+- Do not start implementing, running benchmarks, editing source code, or producing final conclusions unless the user explicitly asks for that and it is necessary for the discussion.
+- If the user shares a link, first clarify what they want extracted from it before expanding into detailed analysis, unless immediate inspection is clearly necessary to answer the user.
+- The later planner and progress stages will read `{paths.task_md.name}` and the summarized `{paths.discussion_md.name}` verbatim.
+- Never say that a file was updated unless you actually updated it yourself in this session.
 
 Current short task summary:
 ```text
@@ -1020,8 +1121,515 @@ Workflow runtime snapshot:
 {parent_runtime}
 ```
 
+Operational requirements:
+- Success in this session means the user leaves with a clarified scope and the transcript contains the information needed to produce a strong `{paths.discussion_md.name}`.
+- If you cannot access an external link or repository from this environment, say that directly and ask the user for the relevant contents or a local path instead of pretending to inspect it.
+- Prefer short factual progress updates after actions are completed; avoid placeholder status messages that merely announce intended future work.
+- Prefer asking the user targeted questions and recording the answers over independently trying to complete the task during this kickoff stage.
+
 Use {planner_model} level reasoning, but keep the interaction practical and iterative.
-Before ending the session, ensure `{paths.discussion_md}` captures the final discussion summary for the workflow.
+Before ending the session, ensure the conversation clearly captures the final discussion summary that should appear in `{paths.discussion_md.name}` after summarization.
+"""
+
+
+def strip_terminal_control_sequences(text: str) -> str:
+    ansi_pattern = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))")
+    cleaned = ansi_pattern.sub("", text)
+    cleaned = cleaned.replace("\r\n", "\n").replace("\r", "\n")
+    cleaned = cleaned.replace("\x07", "").replace("\xa0", " ")
+    lines = []
+    previous_blank = False
+    for raw_line in cleaned.splitlines():
+        line = raw_line.strip("\x00")
+        if line.startswith("Script started on ") or line.startswith("Script done on "):
+            continue
+        is_blank = not line.strip()
+        if is_blank and previous_blank:
+            continue
+        lines.append(line.rstrip())
+        previous_blank = is_blank
+    return "\n".join(lines).strip() + ("\n" if lines else "")
+
+
+def strip_script_log_markers(text: str) -> str:
+    text = re.sub(r"^Script started on .*(?:\n|$)", "", text, count=1, flags=re.MULTILINE)
+    text = re.sub(r"(?:\r?\n)?Script done on .*$", "", text, count=1, flags=re.MULTILINE)
+    return text
+
+
+def skip_osc_sequence(text: str, start: int) -> int:
+    index = start + 2
+    while index < len(text):
+        if text[index] == "\x07":
+            return index + 1
+        if text[index] == "\x1b" and index + 1 < len(text) and text[index + 1] == "\\":
+            return index + 2
+        index += 1
+    return len(text)
+
+
+def skip_dcs_sequence(text: str, start: int) -> int:
+    index = start + 2
+    while index < len(text):
+        if text[index] == "\x1b" and index + 1 < len(text) and text[index + 1] == "\\":
+            return index + 2
+        index += 1
+    return len(text)
+
+
+def parse_csi_sequence(text: str, start: int) -> tuple[str, int]:
+    index = start + 2
+    while index < len(text):
+        ch = text[index]
+        if "@" <= ch <= "~":
+            return text[start + 2 : index + 1], index + 1
+        index += 1
+    return "", len(text)
+
+
+def normalize_discussion_text_line(line: str) -> str:
+    return re.sub(r"\s+", " ", line.replace("\xa0", " ")).strip()
+
+
+def clean_discussion_input_log(text: str) -> str:
+    text = strip_script_log_markers(text)
+    submitted_lines: list[str] = []
+    buffer: list[str] = []
+    cursor = 0
+
+    def commit_line() -> None:
+        nonlocal buffer, cursor
+        line = normalize_discussion_text_line("".join(buffer))
+        if line:
+            submitted_lines.append(line)
+        buffer = []
+        cursor = 0
+
+    index = 0
+    while index < len(text):
+        ch = text[index]
+        if ch == "\x1b":
+            if index + 1 >= len(text):
+                break
+            marker = text[index + 1]
+            if marker == "[":
+                sequence, next_index = parse_csi_sequence(text, index)
+                index = next_index
+                if not sequence:
+                    continue
+                final = sequence[-1]
+                params = sequence[:-1]
+                amount = 1
+                if params and params.split(";")[0].isdigit():
+                    amount = int(params.split(";")[0])
+                if final == "C":
+                    cursor = min(len(buffer), cursor + amount)
+                elif final == "D":
+                    cursor = max(0, cursor - amount)
+                continue
+            if marker == "]":
+                index = skip_osc_sequence(text, index)
+                continue
+            if marker == "P":
+                index = skip_dcs_sequence(text, index)
+                continue
+            index += 2
+            continue
+        if ch in {"\x08", "\x7f"}:
+            if cursor > 0:
+                cursor -= 1
+                del buffer[cursor]
+            index += 1
+            continue
+        if ch in {"\r", "\n"}:
+            commit_line()
+            index += 1
+            continue
+        if ord(ch) < 32:
+            index += 1
+            continue
+        if ch == "\t":
+            ch = " "
+        if cursor == len(buffer):
+            buffer.append(ch)
+        else:
+            buffer.insert(cursor, ch)
+        cursor += 1
+        index += 1
+
+    commit_line()
+    return "\n".join(submitted_lines).strip() + ("\n" if submitted_lines else "")
+
+
+def extract_user_turns_from_input_log(text: str) -> list[str]:
+    cleaned = clean_discussion_input_log(text)
+    if not cleaned:
+        return []
+    return [line.strip() for line in cleaned.splitlines() if line.strip()]
+
+
+def normalize_assistant_message_lines(lines: list[str]) -> str:
+    if not lines:
+        return ""
+    normalized: list[str] = []
+    previous_blank = False
+    for raw_line in lines:
+        line = re.sub(r"\s+", " ", raw_line.strip())
+        if not line:
+            if normalized and not previous_blank:
+                normalized.append("")
+            previous_blank = True
+            continue
+        starts_new_block = bool(re.match(r"^(-|\*|•|\d+\.)\s", line))
+        if normalized and normalized[-1] and not previous_blank and not starts_new_block:
+            normalized[-1] = f"{normalized[-1]} {line}"
+        else:
+            normalized.append(line)
+        previous_blank = False
+    return "\n".join(part for part in normalized if part is not None).strip()
+
+
+def clean_discussion_output_log(text: str) -> str:
+    text = strip_script_log_markers(text)
+    text = re.sub(r"\x1b\[(\d*)C", lambda match: " " * int(match.group(1) or "1"), text)
+    return strip_terminal_control_sequences(text)
+
+
+def is_discussion_status_line(line: str) -> bool:
+    stripped = line.strip()
+    compact = re.sub(r"\s+", "", stripped).lower()
+    if not compact:
+        return False
+    if stripped[0] in {"✢", "✶", "✻", "✽", "·", "*"} and ("…" in stripped or "..." in stripped or "tokens" in stripped):
+        return True
+    if stripped.startswith("⎿ "):
+        return True
+    if stripped.startswith("Tip: "):
+        return True
+    if stripped in {"Press Ctrl-C again to exit", "PressCtrl-C again to exit", "Resume this session with:"}:
+        return True
+    if compact.startswith("claude--resume"):
+        return True
+    if compact.startswith("0;") or compact.startswith("9;"):
+        return True
+    return False
+
+
+def is_fragmented_discussion_noise(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped:
+        return False
+    if stripped in {"~", "=", ","}:
+        return True
+    if stripped.startswith("+ "):
+        return True
+    if stripped in {"Checking for updates", "Tip: ctrl+s to stash"}:
+        return True
+    if len(stripped) == 1 and stripped.isalnum():
+        return True
+    if len(stripped.split()) == 1 and len(stripped) < 12 and stripped[-1] not in ".!?:":
+        return True
+    tokens = stripped.split()
+    short_tokens = sum(1 for token in tokens if len(token) <= 2)
+    if len(tokens) >= 4 and short_tokens * 5 >= len(tokens) * 4:
+        return True
+    if re.fullmatch(r"[\d\s().]+", stripped):
+        return True
+    return False
+
+
+def compact_discussion_line(line: str) -> str:
+    return re.sub(r"\s+", "", line).lower()
+
+
+def prefer_discussion_line(existing: str, candidate: str) -> str:
+    existing_score = (existing.count(" "), sum(ch.isalpha() for ch in existing), len(existing))
+    candidate_score = (candidate.count(" "), sum(ch.isalpha() for ch in candidate), len(candidate))
+    return candidate if candidate_score > existing_score else existing
+
+
+def dedupe_assistant_message_lines(lines: list[str]) -> list[str]:
+    deduped: list[str] = []
+    for raw_line in lines:
+        line = normalize_discussion_text_line(raw_line)
+        if not line:
+            if deduped and deduped[-1] != "":
+                deduped.append("")
+            continue
+        compact = compact_discussion_line(line)
+        replaced = False
+        for index in range(max(0, len(deduped) - 3), len(deduped)):
+            existing = deduped[index]
+            if not existing:
+                continue
+            existing_compact = compact_discussion_line(existing)
+            if compact == existing_compact:
+                deduped[index] = prefer_discussion_line(existing, line)
+                replaced = True
+                break
+            if compact and existing_compact and compact in existing_compact:
+                deduped[index] = prefer_discussion_line(existing, line)
+                replaced = True
+                break
+            if compact and existing_compact and existing_compact in compact:
+                deduped[index] = prefer_discussion_line(existing, line)
+                replaced = True
+                break
+        if not replaced:
+            deduped.append(line)
+    return deduped
+
+
+def is_plausible_assistant_content_line(line: str) -> bool:
+    stripped = normalize_discussion_text_line(line)
+    if not stripped:
+        return False
+    if is_discussion_status_line(stripped) or is_fragmented_discussion_noise(stripped):
+        return False
+    if re.match(r"^(-|\*|•|\d+\.)\s", stripped):
+        return True
+    if stripped.endswith((".", "?", "!", ":")):
+        return True
+    words = re.findall(r"[A-Za-z0-9_/~.-]+", stripped)
+    long_words = sum(1 for word in words if len(word) >= 3)
+    return len(words) >= 4 and long_words >= max(2, len(words) // 2)
+
+
+def is_substantive_assistant_turn(message: str) -> bool:
+    text = message.strip()
+    if not text:
+        return False
+    if "\n- " in text or "\n1. " in text:
+        return True
+    words = re.findall(r"[A-Za-z]{3,}", text)
+    return len(words) >= 12
+
+
+def discussion_word_set(text: str) -> set[str]:
+    return {word.lower() for word in re.findall(r"[A-Za-z]{3,}", text)}
+
+
+def reflected_user_overlap_ratio(text: str, user_turn: str) -> float:
+    words = discussion_word_set(text)
+    if not words:
+        return 0.0
+    overlap = words & discussion_word_set(user_turn)
+    return len(overlap) / len(words)
+
+
+def sanitize_assistant_turn_against_user_turns(message: str, user_turns: list[str]) -> str:
+    lines = [line for line in message.splitlines()]
+    sanitized_lines: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            if sanitized_lines and sanitized_lines[-1] != "":
+                sanitized_lines.append("")
+            continue
+        if re.match(r"^(-|\*|•|\d+\.)\s", stripped) or stripped.endswith("?"):
+            sanitized_lines.append(stripped)
+            continue
+        overlap = max((reflected_user_overlap_ratio(stripped, user_turn) for user_turn in user_turns), default=0.0)
+        if overlap >= 0.85:
+            continue
+        sanitized_lines.append(stripped)
+    sanitized_message = normalize_assistant_message_lines(sanitized_lines)
+    if not sanitized_message:
+        return ""
+    if "?" not in sanitized_message and "\n- " not in sanitized_message:
+        overlap = max((reflected_user_overlap_ratio(sanitized_message, user_turn) for user_turn in user_turns), default=0.0)
+        if overlap >= 0.85:
+            return ""
+    return sanitized_message
+
+
+def extract_assistant_turns_from_output_log(text: str) -> list[str]:
+    cleaned = clean_discussion_output_log(text)
+    lines: list[str] = []
+    noise_substrings = (
+        "claudecode",
+        "tipsforgettingstarted",
+        "welcomeback",
+        "recentactivity",
+        "norecentactivity",
+        "?forshortcuts",
+        "esctointerrupt",
+        "apiusagebilling",
+        "roosting",
+        "schlepping",
+        "/effort",
+    )
+    for raw_line in cleaned.splitlines():
+        line = raw_line.rstrip()
+        compact = re.sub(r"\s+", "", line).lower()
+        if not compact:
+            lines.append("")
+            continue
+        if compact.startswith("scriptstartedon") or compact.startswith("scriptdoneon"):
+            continue
+        if any(token in compact for token in noise_substrings):
+            continue
+        if all(ch in "-─╭╮╰╯│└┘┌┐┆┊━═ " for ch in line):
+            continue
+        if compact in {"❯", "●", "✢", "*", "✶", "✻", "✽", "·"}:
+            continue
+        if compact.startswith("0;"):
+            continue
+        lines.append(line)
+
+    first_assistant_index = next((i for i, line in enumerate(lines) if line.lstrip().startswith("● ")), None)
+    if first_assistant_index is None:
+        return []
+
+    assistant_turns: list[str] = []
+    current_lines: list[str] = []
+    for raw_line in lines[first_assistant_index:]:
+        stripped = raw_line.strip()
+        if not stripped:
+            if current_lines and current_lines[-1] != "":
+                current_lines.append("")
+            continue
+        if stripped.startswith("● "):
+            if current_lines:
+                message = normalize_assistant_message_lines(dedupe_assistant_message_lines(current_lines))
+                if message and is_substantive_assistant_turn(message):
+                    assistant_turns.append(message)
+            current_lines = [stripped[2:].strip()]
+            continue
+        if stripped.startswith("❯"):
+            continue
+        if is_discussion_status_line(stripped):
+            if current_lines:
+                message = normalize_assistant_message_lines(dedupe_assistant_message_lines(current_lines))
+                if message and is_substantive_assistant_turn(message):
+                    assistant_turns.append(message)
+                current_lines = []
+            continue
+        if not is_plausible_assistant_content_line(stripped):
+            continue
+        current_lines.append(stripped)
+    if current_lines:
+        message = normalize_assistant_message_lines(dedupe_assistant_message_lines(current_lines))
+        if message and is_substantive_assistant_turn(message):
+            assistant_turns.append(message)
+    return assistant_turns
+
+
+def build_discussion_transcript(paths: WorkflowPaths) -> str:
+    user_turns: list[str] = []
+    if paths.discussion_input_log.exists():
+        user_turns = extract_user_turns_from_input_log(paths.discussion_input_log.read_text(encoding="utf-8"))
+    assistant_turns: list[str] = []
+    if paths.discussion_output_log.exists():
+        assistant_turns = extract_assistant_turns_from_output_log(paths.discussion_output_log.read_text(encoding="utf-8"))
+    if assistant_turns:
+        assistant_turns = [
+            sanitized
+            for sanitized in (
+                sanitize_assistant_turn_against_user_turns(turn, user_turns) for turn in assistant_turns
+            )
+            if sanitized and is_substantive_assistant_turn(sanitized)
+        ]
+
+    sections = ["# Discussion Transcript", ""]
+    assistant_index = 0
+    user_index = 0
+    turn_number = 1
+
+    if assistant_turns:
+        sections.extend(
+            [
+                "## Assistant Opening",
+                "",
+                "Assistant:",
+                "",
+                assistant_turns[0],
+                "",
+            ]
+        )
+        assistant_index = 1
+
+    while user_index < len(user_turns) or assistant_index < len(assistant_turns):
+        if user_index < len(user_turns):
+            sections.extend(
+                [
+                    f"## User Turn {turn_number}",
+                    "",
+                    "User:",
+                    "",
+                    user_turns[user_index],
+                    "",
+                ]
+            )
+            user_index += 1
+        if assistant_index < len(assistant_turns):
+            sections.extend(
+                [
+                    f"## Assistant Reply {turn_number}",
+                    "",
+                    "Assistant:",
+                    "",
+                    assistant_turns[assistant_index],
+                    "",
+                ]
+            )
+            assistant_index += 1
+        turn_number += 1
+
+    return "\n".join(sections).rstrip() + "\n"
+
+
+def build_discussion_summary_prompt(paths: WorkflowPaths, config: dict[str, Any]) -> str:
+    task_text = paths.task_md.read_text(encoding="utf-8")
+    existing_discussion = paths.discussion_md.read_text(encoding="utf-8")
+    transcript_raw = paths.discussion_transcript.read_text(encoding="utf-8")
+    transcript_text = clip_text(
+        strip_terminal_control_sequences(transcript_raw),
+        DISCUSSION_TRANSCRIPT_PROMPT_CHARS,
+        from_end=True,
+    )
+    model_hint = discussion_model_name(config)
+
+    return f"""You are summarizing a kickoff discussion for a coding workflow.
+
+Rewrite `{paths.discussion_md.name}` as the durable structured summary for later workflow stages.
+Use the transcript as the ground truth. Preserve concrete user decisions, constraints, links, and open questions.
+If the transcript contains assistant claims about edits or actions that were not actually performed, ignore those claims and summarize only the substantive discussion content.
+
+Requirements:
+- Return the full contents of `{paths.discussion_md.name}` only. No surrounding explanation.
+- Organize the file with these sections in order:
+  1. `# Discussion`
+  2. `## Task Summary`
+  3. `## Problem Statement`
+  4. `## Constraints`
+  5. `## Current Understanding`
+  6. `## Promising Directions`
+  7. `## Rejected Ideas`
+  8. `## Open Questions`
+  9. `## Next Actions`
+- Keep the summary concise but specific.
+- Prefer flat bullet lists under the section headings when listing multiple items.
+- Include related links or references only if they were discussed or are already present in the task file.
+- Do not invent facts that are not supported by the transcript or task file.
+- If the transcript is ambiguous, capture that ambiguity as an open question instead of guessing.
+
+Model hint: use {model_hint} level reasoning for synthesis, but keep the output practical and compact.
+
+Task file:
+```markdown
+{task_text.strip()}
+```
+
+Existing discussion file:
+```markdown
+{existing_discussion.strip()}
+```
+
+Discussion transcript:
+```text
+{transcript_text.strip()}
+```
 """
 
 
@@ -1457,6 +2065,50 @@ def run_discussion_session(paths: WorkflowPaths, config: dict[str, Any], task_su
         raise WorkflowError(f"Discussion command failed with exit code {result.returncode}.")
 
     update_state_timestamp(paths.state_json, "last_discussion_launch_at")
+    if not paths.discussion_output_log.exists():
+        raise WorkflowError(
+            f"Discussion output log was not captured at {paths.discussion_output_log}. "
+            "The discussion launcher must save the interactive session logs before summarization."
+        )
+
+    transcript_text = build_discussion_transcript(paths)
+    paths.discussion_transcript.write_text(transcript_text, encoding="utf-8")
+    transcript_text = transcript_text.strip()
+    if not transcript_text:
+        raise WorkflowError(
+            f"Discussion transcript at {paths.discussion_transcript} was empty after cleanup."
+        )
+
+    summary_prompt = build_discussion_summary_prompt(paths, config)
+    summary_prompt_path = paths.prompts_dir / "discussion_summary_prompt.txt"
+    write_prompt_file(summary_prompt_path, summary_prompt)
+    summary_command = parse_command_template(
+        planner_command_config(config),
+        prompt_file=str(summary_prompt_path),
+        workspace=str(paths.root),
+        repo_root=str(paths.repo_root),
+        plan=str(paths.plan_md),
+        results=str(paths.results_md),
+        progress=str(paths.progress_md),
+        task=str(paths.task_md),
+        discussion=str(paths.discussion_md),
+        model=discussion_model_name(config),
+    )
+    summary_result = run_external_command(summary_command, cwd=paths.root)
+    if summary_result.returncode != 0:
+        raise WorkflowError(
+            summarize_command_failure(
+                paths,
+                stage="discussion_summary",
+                message="Discussion summary command failed.",
+                result=summary_result,
+            )
+        )
+
+    summary_text = summary_result.stdout.strip()
+    if not summary_text:
+        raise WorkflowError("Discussion summary command returned empty output.")
+    paths.discussion_md.write_text(summary_text.rstrip() + "\n", encoding="utf-8")
     after_text = paths.discussion_md.read_text(encoding="utf-8")
     return after_text != before_text
 
@@ -1862,6 +2514,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     init_parser = subparsers.add_parser("init", help="Create workflow files in the workspace.")
     init_parser.add_argument("--task-summary", default="", help="Short task summary for the initial manifest.")
     init_parser.add_argument(
+        "--related-link",
+        action="append",
+        default=[],
+        help="Related GitHub, arXiv, or file link to record in task.md. Repeat for multiple links.",
+    )
+    init_parser.add_argument(
         "--model",
         default="",
         help="Default model to persist for both planner and reviewer in this workspace.",
@@ -1916,7 +2574,11 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         if args.command == "init":
-            ensure_workflow_files(paths, task_summary=args.task_summary)
+            task_md_already_exists = paths.task_md.exists()
+            related_links = normalize_related_links(args.related_link)
+            if not task_md_already_exists and not related_links and sys.stdin.isatty():
+                related_links = prompt_for_related_links()
+            ensure_workflow_files(paths, task_summary=args.task_summary, related_links=related_links)
             planner_model = args.planner_model.strip() or args.model.strip()
             reviewer_model = args.reviewer_model.strip() or args.model.strip()
             discussion_model = args.discussion_model.strip() or args.model.strip()
@@ -1934,6 +2596,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Initialized workflow workspace at {paths.root}")
             if any(runtime_model_overrides.values()):
                 print(f"Saved workspace model overrides in {paths.root / 'runtime.env'}")
+            if task_md_already_exists:
+                print(f"Kept existing {paths.task_md}; related links prompt was skipped.")
             if args.no_discussion:
                 return 0
 
@@ -1947,8 +2611,6 @@ def main(argv: list[str] | None = None) -> int:
             discussion_changed = run_discussion_session(paths, config, args.task_summary)
             if discussion_changed:
                 print(f"Updated {paths.discussion_md}")
-            else:
-                print(f"Discussion exited without changing {paths.discussion_md}")
             return 0
 
         ensure_workflow_files(paths)
