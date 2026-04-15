@@ -1,0 +1,21 @@
+workflow:
+  max_auto_replans_per_step: 3
+
+planner:
+  model: sonnet
+  command_template: >-
+    bash {repo_root}/workflow/scripts/run_claude_noninteractive.sh {prompt_file} planner {model}
+
+reviewer:
+  model: sonnet
+  command_template: >-
+    bash {repo_root}/workflow/scripts/run_claude_noninteractive.sh {prompt_file} reviewer {model}
+
+discussion:
+  model: sonnet
+  command_template: >-
+    bash {repo_root}/workflow/scripts/run_claude_discussion.sh {prompt_file} {model}
+
+executor:
+  command_template: >-
+    bash {repo_root}/workflow/scripts/run_codex_executor.sh {prompt_file}

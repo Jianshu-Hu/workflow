@@ -19,8 +19,8 @@ The workflow runner now enforces this structure so `plan.md` and `progress.md` d
 
 ## Configs
 
-- `workflow/config.gemini.example.yaml`: Gemini planner, reviewer, and discussion.
-- `workflow/config.claude.example.yaml`: Claude planner, reviewer, and discussion.
+- `workflow/configs/config.gemini.example.yaml`: Gemini planner, reviewer, and discussion.
+- `workflow/configs/config.claude.example.yaml`: Claude planner, reviewer, and discussion.
 
 Both configs use the same orchestrator. The only difference is which wrapper scripts they call.
 
@@ -31,7 +31,7 @@ Gemini:
 ```bash
 python workflow/orchestrator.py \
   --workspace workflow_runs/my-task \
-  --config workflow/config.gemini.example.yaml \
+  --config workflow/configs/config.gemini.example.yaml \
   init \
   --task-summary "Build feature X" \
   --model gemini-3.1-pro-preview
@@ -42,7 +42,7 @@ Gemini with imported workflow context:
 ```bash
 python workflow/orchestrator.py \
   --workspace workflow_runs/my-task-rerun \
-  --config workflow/config.gemini.example.yaml \
+  --config workflow/configs/config.gemini.example.yaml \
   init \
   --migrate-from-workspace workflow_runs/my-task
 ```
@@ -52,7 +52,7 @@ Claude:
 ```bash
 python workflow/orchestrator.py \
   --workspace workflow_runs/my-task \
-  --config workflow/config.claude.example.yaml \
+  --config workflow/configs/config.claude.example.yaml \
   init \
   --task-summary "Build feature X" \
   --model sonnet
@@ -69,11 +69,11 @@ Then run:
 ```bash
 python workflow/orchestrator.py \
   --workspace workflow_runs/my-task \
-  --config workflow/config.gemini.example.yaml \
+  --config workflow/configs/config.gemini.example.yaml \
   loop
 ```
 
-If that workspace uses Claude, swap the config path to `workflow/config.claude.example.yaml`.
+If that workspace uses Claude, swap the config path to `workflow/configs/config.claude.example.yaml`.
 
 ## Model Selection
 
@@ -89,7 +89,7 @@ Example:
 ```bash
 python workflow/orchestrator.py \
   --workspace workflow_runs/my-task \
-  --config workflow/config.claude.example.yaml \
+  --config workflow/configs/config.claude.example.yaml \
   init \
   --task-summary "Build feature X" \
   --related-link https://github.com/example/project \
@@ -104,11 +104,11 @@ Those values are reused automatically by later `plan`, `review`, and `loop` runs
 ## Common Commands
 
 ```bash
-python workflow/orchestrator.py --workspace workflow_runs/my-task-rerun --config workflow/config.gemini.example.yaml migrate --from-workspace workflow_runs/my-task
-python workflow/orchestrator.py --workspace workflow_runs/my-task --config workflow/config.gemini.example.yaml plan
-python workflow/orchestrator.py --workspace workflow_runs/my-task --config workflow/config.gemini.example.yaml run-step
-python workflow/orchestrator.py --workspace workflow_runs/my-task --config workflow/config.gemini.example.yaml review
-python workflow/orchestrator.py --workspace workflow_runs/my-task --config workflow/config.gemini.example.yaml status
+python workflow/orchestrator.py --workspace workflow_runs/my-task-rerun --config workflow/configs/config.gemini.example.yaml migrate --from-workspace workflow_runs/my-task
+python workflow/orchestrator.py --workspace workflow_runs/my-task --config workflow/configs/config.gemini.example.yaml plan
+python workflow/orchestrator.py --workspace workflow_runs/my-task --config workflow/configs/config.gemini.example.yaml run-step
+python workflow/orchestrator.py --workspace workflow_runs/my-task --config workflow/configs/config.gemini.example.yaml review
+python workflow/orchestrator.py --workspace workflow_runs/my-task --config workflow/configs/config.gemini.example.yaml status
 ```
 
 ## Migration
@@ -121,7 +121,7 @@ Example:
 ```bash
 python workflow/orchestrator.py \
   --workspace workflow_runs/my-task-rerun \
-  --config workflow/config.gemini.example.yaml \
+  --config workflow/configs/config.gemini.example.yaml \
   migrate \
   --from-workspace workflow_runs/my-task
 ```
@@ -131,7 +131,7 @@ If you want the migration and the kickoff discussion in one command, prefer:
 ```bash
 python workflow/orchestrator.py \
   --workspace workflow_runs/my-task-rerun \
-  --config workflow/config.gemini.example.yaml \
+  --config workflow/configs/config.gemini.example.yaml \
   init \
   --migrate-from-workspace workflow_runs/my-task
 ```
@@ -157,17 +157,17 @@ What `migrate` does:
 
 ## Wrappers
 
-- `workflow/run_gemini_noninteractive.sh`
-- `workflow/run_gemini_discussion.sh`
-- `workflow/run_claude_noninteractive.sh`
-- `workflow/run_claude_discussion.sh`
-- `workflow/run_codex_executor.sh`
+- `workflow/scripts/run_gemini_noninteractive.sh`
+- `workflow/scripts/run_gemini_discussion.sh`
+- `workflow/scripts/run_claude_noninteractive.sh`
+- `workflow/scripts/run_claude_discussion.sh`
+- `workflow/scripts/run_codex_executor.sh`
 
 The Gemini and Claude wrappers read prompts from files so large prompts do not overflow shell argument limits.
 
 ## Bootstrap And Preflight Hooks
 
-`workflow/run_workflow.sh` supports two useful environment hooks:
+`workflow/scripts/run_workflow.sh` supports two useful environment hooks:
 
 - `WORKFLOW_BOOTSTRAP_CMD`: runs before the orchestrator starts. Use this for idempotent setup such as activating caches, downloading known public prerequisites, syncing asset mirrors, or materializing generated config files.
 - `WORKFLOW_PREFLIGHT_CMD`: runs after the launcher prints host details but before the workflow loop begins. Use this for fast host validation such as checking GPU visibility, mounted paths, required binaries, or required files/directories.
@@ -185,13 +185,13 @@ Example:
 ```bash
 export WORKFLOW_BOOTSTRAP_CMD='bash scripts/prepare_prereqs.sh'
 export WORKFLOW_PREFLIGHT_CMD='test -f /path/to/required/file && test -d /path/to/required/dir'
-python workflow/orchestrator.py --workspace workflow_runs/my-task --config workflow/config.gemini.example.yaml loop
+python workflow/orchestrator.py --workspace workflow_runs/my-task --config workflow/configs/config.gemini.example.yaml loop
 ```
 
 ## Launcher Default
 
-`workflow/run_workflow.sh` now defaults to:
+`workflow/scripts/run_workflow.sh` now defaults to:
 
 ```bash
-python workflow/orchestrator.py --workspace workflow_runs/default --config workflow/config.gemini.example.yaml loop
+python workflow/orchestrator.py --workspace workflow_runs/default --config workflow/configs/config.gemini.example.yaml loop
 ```

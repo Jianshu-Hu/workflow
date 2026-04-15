@@ -1,0 +1,529 @@
+from __future__ import annotations
+
+import copy
+import re
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+from utils.common import StepResult, WorkflowError, WorkflowPaths, clip_text, utc_now
+
+
+MANIFEST_START = "<!-- WORKFLOW_MANIFEST_START -->"
+MANIFEST_END = "<!-- WORKFLOW_MANIFEST_END -->"
+
+MANIFEST_HISTORY_PROMPT_ENTRIES = 12
+MANIFEST_HISTORY_DETAIL_CHARS = 2000
+MANIFEST_HISTORY_SAVE_ENTRIES = 40
+APPROVED_STEP_SUMMARY_CHARS = 500
+RESULTS_SUMMARY_CHARS = 400
+
+
+def render_manifest(manifest: dict[str, Any]) -> str:
+    yaml_text = yaml.safe_dump(manifest, sort_keys=False, allow_unicode=False).strip()
+    return "\n".join(
+        [
+            MANIFEST_START,
+            "```yaml",
+            yaml_text,
+            "```",
+            MANIFEST_END,
+        ]
+    )
+
+
+def step_label(step: dict[str, Any]) -> str:
+    return f"`{step['id']}` - {step['title']}"
+
+
+def summarize_step_review(step: dict[str, Any]) -> str:
+    review_summary = step.get("review_summary")
+    if isinstance(review_summary, str) and review_summary.strip():
+        return clip_text(review_summary.strip(), APPROVED_STEP_SUMMARY_CHARS, from_end=True)
+    return "No review summary recorded."
+
+
+def render_step_summary(step: dict[str, Any]) -> list[str]:
+    lines = [f"- {step_label(step)} [{step.get('status', 'pending')}]"]
+    if step.get("status") == "approved":
+        lines.append(f"  Review: {summarize_step_review(step)}")
+    elif step.get("status") == "done":
+        lines.append("  Completed.")
+    elif step.get("status") == "needs_changes":
+        lines.append("  Needs changes before the workflow can continue.")
+    return lines
+
+
+def render_step_detail(step: dict[str, Any]) -> str:
+    implementation_lines = [f"- {item}" for item in step.get("implementation", [])] or ["- None recorded."]
+    verification_lines = [f"- {item}" for item in step.get("verification", [])] or ["- None recorded."]
+    objective = str(step.get("objective", "")).strip() or "No objective recorded."
+    return "\n".join(
+        [
+            f"### Step {step_label(step)}",
+            "",
+            f"- Status: `{step.get('status', 'pending')}`",
+            "",
+            "Objective:",
+            objective,
+            "",
+            "Implementation:",
+            *implementation_lines,
+            "",
+            "Verification:",
+            *verification_lines,
+        ]
+    )
+
+
+def render_plan_document(manifest: dict[str, Any]) -> str:
+    approved_steps = [step for step in manifest.get("steps", []) if step.get("status") in {"approved", "done"}]
+    active_step = next(
+        (
+            step
+            for step in manifest.get("steps", [])
+            if step.get("status") in {"in_progress", "needs_changes", "awaiting_review"}
+        ),
+        None,
+    )
+    if active_step is None:
+        active_step = next((step for step in manifest.get("steps", []) if step.get("status") == "pending"), None)
+    upcoming_steps = [
+        step
+        for step in manifest.get("steps", [])
+        if step is not active_step and step.get("status") in {"pending", "needs_changes", "in_progress", "awaiting_review"}
+    ]
+
+    sections = [
+        "# Workflow Plan",
+        "",
+        render_manifest(manifest),
+        "",
+        "## Workflow Summary",
+        "",
+        f"- Task: {manifest.get('task') or '(not set)'}",
+        f"- Workflow status: `{manifest.get('status', 'unknown')}`",
+        f"- Current step: `{manifest.get('current_step') or 'none'}`",
+        "",
+        "## Completed Steps",
+        "",
+    ]
+    if approved_steps:
+        for step in approved_steps:
+            sections.extend(render_step_summary(step))
+    else:
+        sections.append("- None yet.")
+
+    sections.extend(["", "## Current Step", ""])
+    if active_step is not None:
+        sections.append(render_step_detail(active_step))
+    else:
+        sections.append("No active step is recorded.")
+
+    sections.extend(["", "## Upcoming Steps", ""])
+    if upcoming_steps:
+        for index, step in enumerate(upcoming_steps):
+            if index:
+                sections.extend(["", render_step_detail(step)])
+            else:
+                sections.append(render_step_detail(step))
+    else:
+        sections.append("No upcoming steps are recorded.")
+
+    return "\n".join(sections).rstrip() + "\n"
+
+
+def create_default_manifest(task_summary: str = "") -> dict[str, Any]:
+    return {
+        "task": task_summary,
+        "status": "planning",
+        "current_step": None,
+        "steps": [],
+        "history": [],
+        "updated_at": utc_now(),
+    }
+
+
+def extract_manifest_block(plan_text: str) -> tuple[str, int, int]:
+    pattern = re.compile(
+        re.escape(MANIFEST_START)
+        + r"\s*```ya?ml\s*(.*?)\s*```\s*"
+        + re.escape(MANIFEST_END),
+        re.DOTALL,
+    )
+    match = pattern.search(plan_text)
+    if not match:
+        raise WorkflowError(
+            "Could not find workflow manifest block in plan.md. "
+            "Keep the marker comments and fenced YAML block intact."
+        )
+    return match.group(1), match.start(), match.end()
+
+
+def load_plan_manifest(plan_path: Path) -> tuple[dict[str, Any], str]:
+    plan_text = plan_path.read_text(encoding="utf-8")
+    manifest_text, _, _ = extract_manifest_block(plan_text)
+    manifest = yaml.safe_load(manifest_text) or {}
+    if not isinstance(manifest, dict):
+        raise WorkflowError("Plan manifest must be a YAML mapping.")
+    validate_manifest(manifest)
+    return manifest, plan_text
+
+
+def validate_manifest(manifest: dict[str, Any]) -> None:
+    steps = manifest.get("steps")
+    if not isinstance(steps, list):
+        raise WorkflowError("Plan manifest must contain a list under 'steps'.")
+
+    seen_ids: set[str] = set()
+    valid_statuses = {
+        "planning",
+        "pending",
+        "in_progress",
+        "awaiting_review",
+        "approved",
+        "needs_changes",
+        "done",
+    }
+
+    for index, step in enumerate(steps, start=1):
+        if not isinstance(step, dict):
+            raise WorkflowError(f"Step {index} must be a mapping.")
+
+        step_id = step.get("id")
+        if not step_id or not isinstance(step_id, str):
+            raise WorkflowError(f"Step {index} is missing a string 'id'.")
+        if step_id in seen_ids:
+            raise WorkflowError(f"Duplicate step id '{step_id}' in plan manifest.")
+        seen_ids.add(step_id)
+
+        title = step.get("title")
+        if not title or not isinstance(title, str):
+            raise WorkflowError(f"Step {step_id} is missing a string 'title'.")
+
+        status = step.get("status", "pending")
+        if status not in valid_statuses:
+            raise WorkflowError(
+                f"Step {step_id} has unsupported status '{status}'. "
+                f"Expected one of: {sorted(valid_statuses)}."
+            )
+
+        verification = step.get("verification", [])
+        if not isinstance(verification, list):
+            raise WorkflowError(f"Step {step_id} verification must be a list.")
+
+
+def compact_manifest_for_storage(manifest: dict[str, Any]) -> dict[str, Any]:
+    compact = copy.deepcopy(manifest)
+
+    history = compact.get("history")
+    if isinstance(history, list):
+        trimmed_history = history[-MANIFEST_HISTORY_SAVE_ENTRIES:]
+        for entry in trimmed_history:
+            if isinstance(entry, dict) and isinstance(entry.get("details"), str):
+                entry["details"] = clip_history_details(entry["details"])
+        compact["history"] = trimmed_history
+
+    for step in compact.get("steps", []):
+        if not isinstance(step, dict):
+            continue
+        status = step.get("status")
+        if isinstance(step.get("review_summary"), str):
+            step["review_summary"] = clip_text(step["review_summary"], APPROVED_STEP_SUMMARY_CHARS, from_end=True)
+        if status in {"approved", "done"}:
+            step["implementation"] = []
+            step["verification"] = []
+            objective = str(step.get("objective", "")).strip()
+            if objective:
+                step["objective"] = clip_text(objective, RESULTS_SUMMARY_CHARS)
+    return compact
+
+
+def save_plan_manifest(plan_path: Path, manifest: dict[str, Any], plan_text: str) -> None:
+    del plan_text
+    compact_manifest = compact_manifest_for_storage(manifest)
+    validate_manifest(compact_manifest)
+    compact_manifest["updated_at"] = utc_now()
+    plan_path.write_text(render_plan_document(compact_manifest), encoding="utf-8")
+
+
+def get_step(manifest: dict[str, Any], step_id: str) -> dict[str, Any]:
+    for step in manifest["steps"]:
+        if step["id"] == step_id:
+            return step
+    raise WorkflowError(f"Step '{step_id}' not found in plan manifest.")
+
+
+def get_active_step(manifest: dict[str, Any]) -> dict[str, Any]:
+    for step in manifest["steps"]:
+        if step.get("status") in {"in_progress", "awaiting_review", "needs_changes"}:
+            return step
+    for step in manifest["steps"]:
+        if step.get("status") == "pending":
+            return step
+    raise WorkflowError("No pending or active steps remain in the plan manifest.")
+
+
+def mark_step_status(
+    plan_path: Path,
+    step_id: str,
+    new_status: str,
+    *,
+    event: str,
+    details: str,
+) -> dict[str, Any]:
+    manifest, plan_text = load_plan_manifest(plan_path)
+    step = get_step(manifest, step_id)
+    step["status"] = new_status
+    manifest["current_step"] = step_id
+    manifest["status"] = new_status
+    manifest.setdefault("history", []).append(
+        {
+            "step_id": step_id,
+            "event": event,
+            "details": details,
+            "timestamp": utc_now(),
+        }
+    )
+    save_plan_manifest(plan_path, manifest, plan_text)
+    return manifest
+
+
+def append_history_event(
+    plan_path: Path,
+    step_id: str,
+    *,
+    event: str,
+    details: str,
+) -> dict[str, Any]:
+    manifest, plan_text = load_plan_manifest(plan_path)
+    manifest.setdefault("history", []).append(
+        {
+            "step_id": step_id,
+            "event": event,
+            "details": details,
+            "timestamp": utc_now(),
+        }
+    )
+    save_plan_manifest(plan_path, manifest, plan_text)
+    return manifest
+
+
+def approve_step(plan_path: Path, step_id: str, review_summary: str) -> dict[str, Any]:
+    manifest, plan_text = load_plan_manifest(plan_path)
+    step = get_step(manifest, step_id)
+    step["status"] = "approved"
+    step["review_summary"] = review_summary
+    manifest.setdefault("history", []).append(
+        {
+            "step_id": step_id,
+            "event": "approved",
+            "details": review_summary,
+            "timestamp": utc_now(),
+        }
+    )
+
+    next_step_id = None
+    for candidate in manifest["steps"]:
+        if candidate["id"] == step_id:
+            continue
+        if candidate.get("status") == "pending":
+            next_step_id = candidate["id"]
+            break
+
+    if next_step_id is None:
+        manifest["current_step"] = None
+        manifest["status"] = "done"
+    else:
+        manifest["current_step"] = next_step_id
+        manifest["status"] = "pending"
+
+    save_plan_manifest(plan_path, manifest, plan_text)
+    return manifest
+
+
+def clip_history_details(details: str, *, max_chars: int = MANIFEST_HISTORY_DETAIL_CHARS) -> str:
+    stripped = details.strip()
+    if not stripped:
+        return "(empty)"
+    if "Input exceeds the maximum length of 1048576 characters." in stripped:
+        return "Executor prompt exceeded the 1,048,576-character input limit."
+    if len(stripped) <= max_chars:
+        return stripped
+
+    lines = [line.strip() for line in stripped.splitlines() if line.strip()]
+    summary_lines: list[str] = []
+    if lines:
+        summary_lines.append(lines[0])
+
+    error_line = next(
+        (line for line in reversed(lines) if "error" in line.lower() or "failed" in line.lower()),
+        "",
+    )
+    if error_line and error_line not in summary_lines:
+        summary_lines.extend(["...", error_line])
+
+    if summary_lines:
+        summary = "\n".join(summary_lines)
+        if len(summary) <= max_chars:
+            return summary
+
+    return clip_text(stripped, max_chars, from_end=True)
+
+
+def compact_manifest_for_prompt(manifest: dict[str, Any]) -> dict[str, Any]:
+    compact = copy.deepcopy(manifest)
+    history = compact.get("history")
+    if isinstance(history, list):
+        compact["history"] = history[-MANIFEST_HISTORY_PROMPT_ENTRIES:]
+        for entry in compact["history"]:
+            if isinstance(entry, dict) and isinstance(entry.get("details"), str):
+                entry["details"] = clip_history_details(entry["details"])
+
+    for step in compact.get("steps", []):
+        if isinstance(step, dict) and isinstance(step.get("review_summary"), str):
+            step["review_summary"] = clip_text(step["review_summary"], 1000, from_end=True)
+
+    return compact
+
+
+def latest_history_event(
+    manifest: dict[str, Any],
+    *,
+    step_id: str | None = None,
+    events: set[str] | None = None,
+) -> dict[str, Any] | None:
+    for entry in reversed(manifest.get("history", [])):
+        if step_id is not None and entry.get("step_id") != step_id:
+            continue
+        if events is not None and entry.get("event") not in events:
+            continue
+        return entry
+    return None
+
+
+def build_manifest_progress(
+    paths: WorkflowPaths,
+    *,
+    latest_step: dict[str, Any] | None = None,
+    review: StepResult | None = None,
+    progress_error: str | None = None,
+) -> str:
+    manifest, _ = load_plan_manifest(paths.plan_md)
+    completed_steps = [f"- `{item['id']}`" for item in manifest["steps"] if item.get("status") == "approved"]
+    active_step_id = manifest.get("current_step")
+    active_step = get_step(manifest, active_step_id) if active_step_id else None
+    latest_step = latest_step or active_step
+
+    current_status_lines: list[str] = []
+    if manifest.get("status") == "done":
+        current_status_lines.append("- The workflow is complete.")
+    elif active_step is None:
+        current_status_lines.append("- No active step is recorded in the manifest.")
+    elif active_step.get("status") == "awaiting_review":
+        current_status_lines.append(
+            f"- Step `{active_step['id']}` ({active_step['title']}) completed implementation and is awaiting review."
+        )
+    elif active_step.get("status") == "in_progress":
+        current_status_lines.append(
+            f"- Step `{active_step['id']}` ({active_step['title']}) is currently in progress."
+        )
+    elif active_step.get("status") == "needs_changes":
+        current_status_lines.append(
+            f"- Step `{active_step['id']}` ({active_step['title']}) needs changes before the workflow can continue."
+        )
+    else:
+        current_status_lines.append(
+            f"- The next actionable step is `{active_step['id']}` ({active_step['title']})."
+        )
+    current_status_lines.append(f"- **Workflow Status:** `{manifest.get('status', 'unknown')}`")
+
+    if review is not None and latest_step is not None:
+        latest_review_lines = [
+            f"- **Step:** `{latest_step['id']}`",
+            f"- **Approved:** `{str(review.approved).lower()}`",
+            f"- **Rationale:** {review.summary}",
+        ]
+    else:
+        review_event = latest_history_event(manifest, events={"approved", "changes_requested"})
+        if review_event is None:
+            latest_review_lines = ["- No review has been recorded yet for the current workflow state."]
+        else:
+            approved = review_event.get("event") == "approved"
+            latest_review_lines = [
+                f"- **Step:** `{review_event.get('step_id', 'unknown')}`",
+                f"- **Approved:** `{str(approved).lower()}`",
+                f"- **Rationale:** {clip_history_details(review_event.get('details', 'No review summary recorded.'))}",
+            ]
+
+    open_issues: list[str] = []
+    if progress_error:
+        open_issues.append(f"- Progress checkpoint fallback was used: {progress_error}")
+    if review is not None and not review.approved:
+        open_issues.extend(f"- {item}" for item in review.required_changes)
+        if review.human_intervention_required:
+            reason = review.human_intervention_reason or review.summary
+            open_issues.append(f"- Human intervention required: {reason}")
+    elif active_step is not None:
+        active_status = active_step.get("status")
+        if active_status == "awaiting_review":
+            open_issues.append(f"- Review for `{active_step['id']}` has not run yet.")
+        elif active_status == "needs_changes":
+            latest_failure = latest_history_event(manifest, step_id=active_step["id"])
+            details = latest_failure.get("details") if latest_failure else None
+            if details:
+                open_issues.append(f"- {clip_history_details(details)}")
+    if not open_issues:
+        open_issues.append("- None recorded.")
+
+    if manifest.get("status") == "done":
+        next_step_line = "- Workflow is complete."
+        resume_lines = [
+            f"- Inspect `{paths.results_md.name}` and `{paths.plan_md.name}` for the final approved record.",
+        ]
+    elif active_step is None:
+        next_step_line = "- No actionable step is recorded."
+        resume_lines = [
+            f"- Inspect `{paths.plan_md.name}` and `{paths.results_md.name}` to repair the workflow manifest before continuing.",
+        ]
+    elif active_step.get("status") == "awaiting_review":
+        next_step_line = f"- Review `{active_step['id']}` ({active_step['title']})."
+        resume_lines = [
+            f"- Inspect `{paths.results_md.name}` and `{paths.plan_md.name}` first.",
+            f"- Run `python workflow/orchestrator.py --workspace {paths.root} review --step-id {active_step['id']}` or resume `loop` from the same workspace.",
+        ]
+    else:
+        next_step_line = f"- `{active_step['id']}` ({active_step['title']})"
+        resume_lines = [
+            f"- Inspect `{paths.progress_md.name}`, `{paths.results_md.name}`, and `{paths.plan_md.name}` first.",
+            f"- Resume from step `{active_step['id']}`.",
+        ]
+
+    return "\n".join(
+        [
+            "# Workflow Progress",
+            "",
+            "## Current Status",
+            *current_status_lines,
+            "",
+            "## Completed Steps",
+            *(completed_steps or ["- None yet."]),
+            "",
+            "## Latest Review",
+            *latest_review_lines,
+            "",
+            "## Open Issues",
+            *open_issues,
+            "",
+            "## Next Step",
+            next_step_line,
+            "",
+            "## Resume Instructions",
+            *resume_lines,
+        ]
+    )
+
+
+def build_fallback_progress(paths: WorkflowPaths, step: dict[str, Any], review: StepResult) -> str:
+    return build_manifest_progress(paths, latest_step=step, review=review)

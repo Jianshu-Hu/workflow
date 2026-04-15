@@ -4,7 +4,7 @@ set -euo pipefail
 prompt_file=${1:?prompt_file is required}
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-repo_root=$(cd "${script_dir}/.." && pwd)
+repo_root=$(cd "${script_dir}/../.." && pwd)
 executor_root=${WORKFLOW_EXECUTOR_CWD:-${repo_root}}
 sandbox_mode=${WORKFLOW_CODEX_SANDBOX:-danger-full-access}
 inherit_env=${WORKFLOW_CODEX_INHERIT_ENV:-1}

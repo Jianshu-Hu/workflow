@@ -1,0 +1,21 @@
+workflow:
+  max_auto_replans_per_step: 3
+
+planner:
+  model: gemini-3.1-pro-preview
+  command_template: >-
+    bash {repo_root}/workflow/scripts/run_gemini_noninteractive.sh {prompt_file} planner {model}
+
+reviewer:
+  model: gemini-3.1-pro-preview
+  command_template: >-
+    bash {repo_root}/workflow/scripts/run_gemini_noninteractive.sh {prompt_file} reviewer {model}
+
+discussion:
+  model: gemini-3.1-pro-preview
+  command_template: >-
+    bash {repo_root}/workflow/scripts/run_gemini_discussion.sh {prompt_file} {model}
+
+executor:
+  command_template: >-
+    bash {repo_root}/workflow/scripts/run_codex_executor.sh {prompt_file}

@@ -140,9 +140,10 @@ elif command -v readlink >/dev/null 2>&1; then
   script_path=$(readlink -f "${script_path}" 2>/dev/null || printf '%s\n' "${script_path}")
 fi
 
-repo_root=${WORKFLOW_REPO_ROOT:-$(cd "${script_dir}/.." && pwd)}
+workflow_root=$(cd "${script_dir}/.." && pwd)
+repo_root=${WORKFLOW_REPO_ROOT:-$(cd "${workflow_root}/.." && pwd)}
 python_bin=${WORKFLOW_PYTHON:-python}
-config_path=${WORKFLOW_CONFIG:-${script_dir}/config.gemini.example.yaml}
+config_path=${WORKFLOW_CONFIG:-${workflow_root}/configs/config.gemini.example.yaml}
 default_workspace=${WORKFLOW_WORKSPACE:-workflow_runs/default}
 cli_workspace=$(extract_cli_option_value --workspace "$@" || true)
 workspace_path=${cli_workspace:-${default_workspace}}
@@ -224,4 +225,4 @@ if [[ $# -eq 0 ]]; then
   set -- --workspace "${default_workspace}" --config "${config_path}" loop
 fi
 
-exec "${python_bin}" "${script_dir}/orchestrator.py" "$@"
+exec "${python_bin}" "${workflow_root}/orchestrator.py" "$@"
