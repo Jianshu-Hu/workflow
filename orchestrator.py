@@ -130,6 +130,39 @@ def ensure_workflow_files(
             save_state(paths.state_json, state)
 
 
+def refresh_placeholder_workspace(
+    paths: WorkflowPaths,
+    *,
+    task_summary: str,
+    related_links: list[str] | None = None,
+) -> bool:
+    summary = task_summary.strip()
+    if not summary:
+        return False
+
+    changed = False
+    default_task_template = render_task_template()
+    desired_task_template = render_task_template(summary, related_links=related_links)
+    if paths.task_md.exists() and paths.task_md.read_text(encoding="utf-8") == default_task_template:
+        paths.task_md.write_text(desired_task_template, encoding="utf-8")
+        changed = True
+
+    default_discussion_template = render_discussion_template()
+    desired_discussion_template = render_discussion_template(summary)
+    if paths.discussion_md.exists() and paths.discussion_md.read_text(encoding="utf-8") == default_discussion_template:
+        paths.discussion_md.write_text(desired_discussion_template, encoding="utf-8")
+        changed = True
+
+    if paths.plan_md.exists():
+        manifest, plan_text = load_plan_manifest(paths.plan_md)
+        if not str(manifest.get("task", "")).strip() and not manifest.get("steps"):
+            manifest["task"] = summary
+            save_plan_manifest(paths.plan_md, manifest, plan_text)
+            changed = True
+
+    return changed
+
+
 def parse_command_template(template: str, **kwargs: str) -> list[str]:
     if not template.strip():
         raise WorkflowError("Command template is empty.")
@@ -1278,6 +1311,7 @@ def main(argv: list[str] | None = None) -> int:
             related_links = normalize_related_links(args.related_link)
             migration_source = args.migrate_from_workspace.strip()
             migrated_during_init = False
+            refreshed_placeholders = False
 
             if migration_source:
                 source_paths = WorkflowPaths(root=Path(migration_source).resolve())
@@ -1293,6 +1327,11 @@ def main(argv: list[str] | None = None) -> int:
                 if not task_md_already_exists and not related_links and sys.stdin.isatty():
                     related_links = prompt_for_related_links()
                 ensure_workflow_files(paths, task_summary=args.task_summary, related_links=related_links)
+                refreshed_placeholders = refresh_placeholder_workspace(
+                    paths,
+                    task_summary=args.task_summary,
+                    related_links=related_links,
+                )
             planner_model = args.planner_model.strip() or args.model.strip()
             reviewer_model = args.reviewer_model.strip() or args.model.strip()
             discussion_model = args.discussion_model.strip() or args.model.strip()
@@ -1313,7 +1352,9 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"Saved migration summary in {paths.migration_md}")
             if any(runtime_model_overrides.values()):
                 print(f"Saved workspace model overrides in {paths.root / 'runtime.env'}")
-            if task_md_already_exists and not migrated_during_init:
+            if refreshed_placeholders:
+                print(f"Updated placeholder workflow files in {paths.root} with the provided task summary.")
+            if task_md_already_exists and not migrated_during_init and not refreshed_placeholders:
                 print(f"Kept existing {paths.task_md}; related links prompt was skipped.")
             if args.no_discussion:
                 return 0
