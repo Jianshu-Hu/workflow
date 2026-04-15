@@ -77,6 +77,7 @@ RESULTS_PROMPT_CHARS = 24000
 APPROVED_STEP_SUMMARY_CHARS = 500
 RESULTS_SUMMARY_CHARS = 400
 DISCUSSION_TRANSCRIPT_PROMPT_CHARS = 60000
+MIGRATION_PROMPT_CHARS = 20000
 
 
 def normalize_related_links(related_links: list[str] | None) -> list[str]:
@@ -216,6 +217,10 @@ class WorkflowPaths:
     @property
     def results_md(self) -> Path:
         return self.root / "results.md"
+
+    @property
+    def migration_md(self) -> Path:
+        return self.root / "migration.md"
 
     @property
     def progress_md(self) -> Path:
@@ -591,6 +596,412 @@ def ensure_workflow_files(
                 changed = True
         if changed:
             save_state(paths.state_json, state)
+
+
+def read_optional_text(path: Path) -> str:
+    if not path.exists():
+        return ""
+    return path.read_text(encoding="utf-8")
+
+
+def extract_markdown_section(markdown_text: str, heading: str) -> str:
+    pattern = re.compile(
+        rf"(?ms)^## {re.escape(heading)}\s*\n(.*?)(?=^## |\Z)",
+    )
+    match = pattern.search(markdown_text)
+    if not match:
+        return ""
+    return match.group(1).strip()
+
+
+def extract_markdown_bullets(section_text: str) -> list[str]:
+    bullets: list[str] = []
+    for line in section_text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("- "):
+            bullets.append(stripped)
+    return bullets
+
+
+def issues_list_is_placeholder(lines: list[str]) -> bool:
+    if not lines:
+        return True
+    placeholders = {
+        "- none recorded.",
+        "- none recorded in the source progress file.",
+    }
+    return all(line.strip().lower() in placeholders for line in lines)
+
+
+def extract_task_summary(task_text: str, manifest_task: str = "") -> str:
+    candidates = [extract_markdown_section(task_text, "Summary"), task_text, manifest_task]
+    for candidate_text in candidates:
+        stripped = candidate_text.strip()
+        if not stripped:
+            continue
+        for block in re.split(r"\n\s*\n", stripped):
+            lines = [
+                line.strip()
+                for line in block.splitlines()
+                if line.strip() and not line.lstrip().startswith("#")
+            ]
+            prose_lines = [line for line in lines if not line.startswith("- ")]
+            candidate = " ".join(prose_lines).strip()
+            if candidate:
+                return clip_text(candidate, RESULTS_SUMMARY_CHARS)
+    return "Imported workflow task"
+
+
+def format_source_step_summary(step: dict[str, Any]) -> str:
+    label = f"`{step['id']}` ({step['title']}) [{step.get('status', 'pending')}]"
+    if step.get("status") == "approved":
+        return f"- {label}: {summarize_step_review(step)}"
+    if step.get("status") == "done":
+        return f"- {label}: Completed in the source workspace."
+    objective = str(step.get("objective", "")).strip()
+    if objective:
+        return f"- {label}: {clip_text(objective, RESULTS_SUMMARY_CHARS)}"
+    return f"- {label}"
+
+
+def derive_open_issues_from_manifest(source_manifest: dict[str, Any]) -> list[str]:
+    derived: list[str] = []
+    latest_review = latest_history_event(source_manifest, events={"approved", "changes_requested"})
+    if latest_review and isinstance(latest_review.get("details"), str):
+        details = clip_history_details(latest_review["details"])
+        lowered = details.lower()
+        keywords = (
+            "missing",
+            "block",
+            "blocked",
+            "prevent",
+            "prerequisite",
+            "rerun",
+            "repair",
+            "human intervention",
+            "operator-owned",
+        )
+        if any(keyword in lowered for keyword in keywords):
+            derived.append(f"- Derived from latest review: {details}")
+
+    try:
+        active_step = get_active_step(source_manifest)
+    except WorkflowError:
+        active_step = None
+    if active_step is not None and active_step.get("status") in {"needs_changes", "in_progress", "awaiting_review"}:
+        derived.append(
+            f"- Active source step `{active_step['id']}` ({active_step['title']}) still needs attention."
+        )
+    return derived
+
+
+def append_import_note(markdown_text: str, *, source_root: Path, imported_at: str, note_heading: str) -> str:
+    base = markdown_text.rstrip()
+    if not base:
+        base = f"# {note_heading}"
+    note_lines = [
+        "",
+        f"## {note_heading}",
+        "",
+        f"- Imported from `{source_root}` at `{imported_at}`.",
+        "- Continue from `migration.md` in this workspace instead of restarting completed work.",
+    ]
+    return "\n".join([base, *note_lines]).rstrip() + "\n"
+
+
+def load_source_manifest(paths: WorkflowPaths) -> tuple[dict[str, Any], str | None]:
+    if not paths.plan_md.exists():
+        return create_default_manifest(), f"Missing source plan file: {paths.plan_md}"
+    try:
+        manifest, _ = load_plan_manifest(paths.plan_md)
+        return manifest, None
+    except WorkflowError as exc:
+        return create_default_manifest(), str(exc)
+
+
+def build_migration_handoff(
+    *,
+    source_paths: WorkflowPaths,
+    source_manifest: dict[str, Any],
+    source_manifest_error: str | None,
+    imported_at: str,
+) -> str:
+    source_task_text = read_optional_text(source_paths.task_md)
+    source_progress_text = read_optional_text(source_paths.progress_md)
+    source_results_path = source_paths.results_md
+    source_state = load_state(source_paths.state_json) if source_paths.state_json.exists() else {}
+
+    task_summary = extract_task_summary(source_task_text, str(source_manifest.get("task", "")))
+    completed_steps = [
+        format_source_step_summary(step)
+        for step in source_manifest.get("steps", [])
+        if step.get("status") in {"approved", "done"}
+    ] or ["- None recorded in the source workspace."]
+
+    active_step = None
+    try:
+        active_step = get_active_step(source_manifest)
+    except WorkflowError:
+        active_step = None
+
+    unfinished_lines = ["- No active unfinished step was recorded in the source manifest."]
+    if active_step is not None:
+        unfinished_lines = [format_source_step_summary(active_step)]
+
+    latest_review_lines = extract_markdown_bullets(
+        extract_markdown_section(source_progress_text, "Latest Review")
+    ) or ["- No latest review section was available in the source progress file."]
+    open_issue_lines = extract_markdown_bullets(
+        extract_markdown_section(source_progress_text, "Open Issues")
+    )
+    if issues_list_is_placeholder(open_issue_lines):
+        open_issue_lines = derive_open_issues_from_manifest(source_manifest)
+    if not open_issue_lines:
+        open_issue_lines = ["- None recorded in the source progress file."]
+    next_step_lines = extract_markdown_bullets(
+        extract_markdown_section(source_progress_text, "Next Step")
+    ) or ["- No explicit next step was recorded in the source progress file."]
+
+    manifest_warning_lines = []
+    if source_manifest_error:
+        manifest_warning_lines = [
+            "## Import Warnings",
+            "",
+            f"- Source manifest could not be parsed cleanly: {source_manifest_error}",
+            "",
+        ]
+
+    history_lines: list[str] = []
+    for entry in source_manifest.get("history", [])[-5:]:
+        timestamp = entry.get("timestamp", "unknown")
+        event = entry.get("event", "unknown")
+        step_id = entry.get("step_id", "unknown")
+        details = clip_history_details(str(entry.get("details", "")))
+        history_lines.append(f"- `{timestamp}` `{step_id}` `{event}`: {details}")
+    if not history_lines:
+        history_lines = ["- No recent source history entries were available."]
+
+    return "\n".join(
+        [
+            "# Migration Handoff",
+            "",
+            "## Source Workspace",
+            "",
+            f"- Source workspace: `{source_paths.root}`",
+            f"- Imported at: `{imported_at}`",
+            f"- Source workflow status: `{source_manifest.get('status', 'unknown')}`",
+            f"- Source current step: `{source_manifest.get('current_step') or 'none'}`",
+            f"- Source task summary: {task_summary}",
+            f"- Source results log: `{source_results_path}`",
+            f"- Source progress file: `{source_paths.progress_md}`",
+            f"- Source plan file: `{source_paths.plan_md}`",
+            (
+                f"- Source created_at: `{source_state.get('created_at')}`"
+                if source_state.get("created_at")
+                else "- Source created_at: not recorded."
+            ),
+            (
+                f"- Source last review at: `{source_state.get('last_review_at')}`"
+                if source_state.get("last_review_at")
+                else "- Source last review at: not recorded."
+            ),
+            "",
+            *manifest_warning_lines,
+            "## Completed Work",
+            "",
+            *completed_steps,
+            "",
+            "## Unfinished Work",
+            "",
+            *unfinished_lines,
+            "",
+            "## Latest Review",
+            "",
+            *latest_review_lines,
+            "",
+            "## Open Issues To Revisit",
+            "",
+            *open_issue_lines,
+            "",
+            "## Next Step From Source Workflow",
+            "",
+            *next_step_lines,
+            "",
+            "## Recent Source History",
+            "",
+            *history_lines,
+            "",
+            "## Planning Guidance",
+            "",
+            "- Continue from the imported unfinished work instead of recreating already approved steps.",
+            "- Re-validate any source blocker that may already have been fixed outside the workflow.",
+            "- Read the source workspace directly if more detail is needed than this handoff captures.",
+        ]
+    ).rstrip() + "\n"
+
+
+def build_migrated_progress(
+    *,
+    source_paths: WorkflowPaths,
+    source_manifest: dict[str, Any],
+    imported_at: str,
+) -> str:
+    source_progress_text = read_optional_text(source_paths.progress_md)
+    latest_review_lines = extract_markdown_bullets(
+        extract_markdown_section(source_progress_text, "Latest Review")
+    ) or ["- No latest review section was available in the source progress file."]
+    open_issue_lines = extract_markdown_bullets(
+        extract_markdown_section(source_progress_text, "Open Issues")
+    )
+    if issues_list_is_placeholder(open_issue_lines):
+        open_issue_lines = derive_open_issues_from_manifest(source_manifest)
+    if not open_issue_lines:
+        open_issue_lines = ["- None recorded in the source progress file."]
+
+    return "\n".join(
+        [
+            "# Workflow Progress",
+            "",
+            "## Current Status",
+            f"- This workspace was migrated from `{source_paths.root}` at `{imported_at}`.",
+            "- No execution has happened in this destination workspace yet.",
+            "- **Workflow Status:** `planning`",
+            "",
+            "## Completed Steps",
+            "- None yet in this workspace.",
+            "- Prior completed work is summarized in `migration.md`.",
+            "",
+            "## Latest Review",
+            *latest_review_lines,
+            "",
+            "## Open Issues",
+            *open_issue_lines,
+            "- A fresh plan still needs to be generated in this workspace before execution resumes.",
+            "",
+            "## Next Step",
+            "- Generate a new plan that continues from `migration.md` and the imported source evidence.",
+            "",
+            "## Resume Instructions",
+            "- Read `migration.md`, `task.md`, and `discussion.md` in this workspace first.",
+            f"- Inspect the source workspace at `{source_paths.root}` directly if more detail is needed.",
+            (
+                f"- The source workflow last recorded status was `{source_manifest.get('status', 'unknown')}`."
+            ),
+        ]
+    ).rstrip() + "\n"
+
+
+def ensure_destination_workspace_is_fresh(paths: WorkflowPaths) -> None:
+    if not paths.root.exists():
+        return
+
+    existing_files = [
+        candidate
+        for candidate in (
+            paths.task_md,
+            paths.discussion_md,
+            paths.plan_md,
+            paths.results_md,
+            paths.migration_md,
+            paths.progress_md,
+            paths.state_json,
+            paths.root / "runtime.env",
+        )
+        if candidate.exists()
+    ]
+    if existing_files:
+        raise WorkflowError(
+            "Destination workspace already contains workflow state: "
+            + ", ".join(str(path) for path in existing_files)
+        )
+
+
+def run_migration(
+    dest_paths: WorkflowPaths,
+    *,
+    source_paths: WorkflowPaths,
+    copy_runtime_env: bool,
+) -> None:
+    if dest_paths.root == source_paths.root:
+        raise WorkflowError("Source and destination workspaces must be different.")
+    if not source_paths.root.exists():
+        raise WorkflowError(f"Source workspace does not exist: {source_paths.root}")
+    for required in (
+        source_paths.task_md,
+        source_paths.discussion_md,
+        source_paths.progress_md,
+    ):
+        if not required.exists():
+            raise WorkflowError(f"Source workspace is missing required file: {required}")
+
+    ensure_destination_workspace_is_fresh(dest_paths)
+
+    source_manifest, source_manifest_error = load_source_manifest(source_paths)
+    source_task_text = read_optional_text(source_paths.task_md)
+    source_discussion_text = read_optional_text(source_paths.discussion_md)
+    task_summary = extract_task_summary(source_task_text, str(source_manifest.get("task", "")))
+    imported_at = utc_now()
+
+    ensure_workflow_files(dest_paths, task_summary=task_summary)
+
+    dest_paths.task_md.write_text(
+        append_import_note(
+            source_task_text or render_task_template(task_summary),
+            source_root=source_paths.root,
+            imported_at=imported_at,
+            note_heading="Imported Workflow Context",
+        ),
+        encoding="utf-8",
+    )
+    dest_paths.discussion_md.write_text(
+        append_import_note(
+            source_discussion_text or render_discussion_template(task_summary),
+            source_root=source_paths.root,
+            imported_at=imported_at,
+            note_heading="Imported Workflow Context",
+        ),
+        encoding="utf-8",
+    )
+    dest_paths.migration_md.write_text(
+        build_migration_handoff(
+            source_paths=source_paths,
+            source_manifest=source_manifest,
+            source_manifest_error=source_manifest_error,
+            imported_at=imported_at,
+        ),
+        encoding="utf-8",
+    )
+    dest_paths.progress_md.write_text(
+        build_migrated_progress(
+            source_paths=source_paths,
+            source_manifest=source_manifest,
+            imported_at=imported_at,
+        ),
+        encoding="utf-8",
+    )
+    dest_paths.results_md.write_text(
+        (
+            RESULTS_HEADER
+            + "\n"
+            + "## Migration Import\n\n"
+            + f"- Imported from `{source_paths.root}` at `{imported_at}`.\n"
+            + f"- Source workflow status: `{source_manifest.get('status', 'unknown')}`.\n"
+            + f"- Source current step: `{source_manifest.get('current_step') or 'none'}`.\n"
+            + "- This destination workspace starts cleanly in planning state; see `migration.md` for the handoff summary.\n"
+        ),
+        encoding="utf-8",
+    )
+
+    state = load_state(dest_paths.state_json)
+    state["migrated_from"] = str(source_paths.root)
+    state["migrated_at"] = imported_at
+    save_state(dest_paths.state_json, state)
+
+    if copy_runtime_env and (source_paths.root / "runtime.env").exists():
+        (dest_paths.root / "runtime.env").write_text(
+            (source_paths.root / "runtime.env").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
 
 
 def extract_manifest_block(plan_text: str) -> tuple[str, int, int]:
@@ -1007,10 +1418,28 @@ def discussion_model_name(config: dict[str, Any]) -> str:
 def build_planner_prompt(paths: WorkflowPaths, config: dict[str, Any]) -> str:
     task_text = paths.task_md.read_text(encoding="utf-8")
     discussion_text = paths.discussion_md.read_text(encoding="utf-8")
+    migration_text = (
+        clip_text(paths.migration_md.read_text(encoding="utf-8"), MIGRATION_PROMPT_CHARS, from_end=True)
+        if paths.migration_md.exists()
+        else ""
+    )
     existing_plan = clip_text(paths.plan_md.read_text(encoding="utf-8"), PLAN_PROMPT_CHARS, from_end=True)
     progress_text = clip_text(paths.progress_md.read_text(encoding="utf-8"), PROGRESS_PROMPT_CHARS, from_end=True)
     model_hint = planner_model_name(config)
     parent_runtime = runtime_context(paths)
+    migration_requirements = ""
+    migration_block = ""
+    if migration_text.strip():
+        migration_requirements = (
+            f"- If `{paths.migration_md.name}` exists, treat it as the authoritative handoff from an earlier "
+            "workflow workspace and continue from it instead of restarting from scratch.\n"
+        )
+        migration_block = f"""
+Imported migration handoff:
+```markdown
+{migration_text.strip()}
+```
+"""
 
     return f"""You are the planning agent for a coding workflow.
 
@@ -1036,13 +1465,17 @@ Requirements:
 - If detailed evidence matters, reference `results.md` or workflow artifacts instead of embedding bulk output in the plan.
 - Do not mark any step approved before review.
 - Inspect {paths.progress_md.name} and continue from the latest recorded workflow state instead of restarting completed work.
+- Inspect `{paths.migration_md.name}` too when it exists.
 - If the existing manifest and {paths.progress_md.name} disagree, prefer the more recent concrete execution evidence in {paths.results_md.name} and reconcile the plan.
 - If the latest review rejected a step but did not require human intervention, update the plan so the next loop iteration attempts a concrete fix instead of repeating the same failed action blindly.
 - Preserve already approved steps unless the evidence shows they are invalid.
 - If remediation requires debugging the workflow itself, add explicit repair or diagnostic steps rather than treating the issue as a permanent external blocker.
 - Prefer workflow-owned helper scripts and artifacts under the workflow workspace when automation glue is needed.
+- If a failure is caused by missing public checkpoints, datasets, assets, or packages and the repository already documents or scripts how to acquire them, treat that as workflow work. Add an explicit prerequisite-staging or cache-population step instead of immediately requiring human intervention.
+- For large or slow prerequisite downloads, prefer idempotent, resumable staging steps that materialize stable shared paths or caches before the expensive evaluation step runs.
 - Avoid modifying tracked files inside submodules unless there is no viable workflow-local or repository-local alternative.
-- Only leave the workflow blocked on human intervention if the latest evidence shows a permission, credential, quota, unavailable external resource, or operator-owned environment change that cannot be solved from this repository.
+- Only leave the workflow blocked on human intervention if the latest evidence shows a permission, credential, quota, unavailable external resource with no workflow-controlled acquisition path, or operator-owned environment change that cannot be solved from this repository.
+{migration_requirements}
 
 Parent workflow runtime snapshot:
 ```text
@@ -1068,6 +1501,7 @@ Current progress file:
 ```markdown
 {progress_text.strip()}
 ```
+{migration_block}
 
 Return the full contents of {paths.plan_md.name} only. No surrounding explanation.
 """
@@ -1076,9 +1510,30 @@ Return the full contents of {paths.plan_md.name} only. No surrounding explanatio
 def build_discussion_prompt(paths: WorkflowPaths, task_summary: str = "", config: dict[str, Any] | None = None) -> str:
     task_text = paths.task_md.read_text(encoding="utf-8")
     discussion_text = paths.discussion_md.read_text(encoding="utf-8")
+    migration_text = (
+        clip_text(paths.migration_md.read_text(encoding="utf-8"), MIGRATION_PROMPT_CHARS, from_end=True)
+        if paths.migration_md.exists()
+        else ""
+    )
     parent_runtime = runtime_context(paths)
     planner_model = discussion_model_name(config or {})
     summary_line = task_summary.strip() or "No short task summary was provided."
+    migration_requirements = ""
+    migration_block = ""
+    if migration_text.strip():
+        migration_requirements = f"""
+- Read `{paths.migration_md.name}` first and use it as the starting context for this discussion.
+- Treat this session as a continuation handoff, not a greenfield kickoff.
+- Base the discussion on the imported prior progress, unresolved blockers, and the likely next step.
+- If the imported handoff leaves ambiguity, inspect the related files in the source workflow workspace referenced by `{paths.migration_md.name}` before making strong claims.
+- Ask at least one targeted question about what changed since the source workflow stopped, what was repaired manually, or what should be retried now.
+"""
+        migration_block = f"""
+Imported migration handoff:
+```markdown
+{migration_text.strip()}
+```
+"""
 
     return f"""You are kicking off the research discussion for a coding workflow.
 
@@ -1100,6 +1555,7 @@ Session requirements:
 - If the user shares a link, first clarify what they want extracted from it before expanding into detailed analysis, unless immediate inspection is clearly necessary to answer the user.
 - The later planner and progress stages will read `{paths.task_md.name}` and the summarized `{paths.discussion_md.name}` verbatim.
 - Never say that a file was updated unless you actually updated it yourself in this session.
+{migration_requirements}
 
 Current short task summary:
 ```text
@@ -1115,6 +1571,7 @@ Current discussion file:
 ```markdown
 {discussion_text.strip()}
 ```
+{migration_block}
 
 Workflow runtime snapshot:
 ```text
@@ -1295,11 +1752,83 @@ def clean_discussion_output_log(text: str) -> str:
     return strip_terminal_control_sequences(text)
 
 
+DISCUSSION_REQUIRED_SECTIONS = [
+    "# Discussion",
+    "## Task Summary",
+    "## Problem Statement",
+    "## Constraints",
+    "## Current Understanding",
+    "## Promising Directions",
+    "## Rejected Ideas",
+    "## Open Questions",
+    "## Next Actions",
+]
+
+
+def is_discussion_approval_line(line: str) -> bool:
+    stripped = normalize_discussion_text_line(line)
+    compact = re.sub(r"\s+", "", stripped).lower()
+    if not compact:
+        return False
+    exact_matches = {
+        "thiscommandrequiresapproval",
+        "doyouwanttoproceed?",
+        "2.yes,anddontaskagainfor:",
+        "3.no",
+        "esctocanceltabtoamendctrl+etoexplain",
+        "thefilewriterequiresyourapproval.pleasegrantpermissiontowriteto`discussion.md`andi'llproceed.",
+    }
+    if compact in exact_matches:
+        return True
+    if compact.startswith("doyouwanttoproceed"):
+        return True
+    if compact.startswith("thefilewriterequiresyourapproval"):
+        return True
+    if compact.startswith("pleasegrantpermissiontowriteto"):
+        return True
+    return False
+
+
+def is_discussion_tool_noise_line(line: str) -> bool:
+    stripped = normalize_discussion_text_line(line)
+    compact = re.sub(r"\s+", "", stripped).lower()
+    if not compact:
+        return False
+    if re.fullmatch(r"\* [A-Za-z0-9]{1,3}", stripped):
+        return True
+    if stripped.startswith("$ ") or stripped.startswith("Bash("):
+        return True
+    if stripped.startswith(("usage: ", "error: ", "huggingface-cli: error:")):
+        return True
+    if compact.startswith(("searchingfor", "reading", "listing", "find(")):
+        return True
+    if "ctrl+otoexpand" in compact:
+        return True
+    if "requiresapproval" in compact or "grantpermissionto" in compact:
+        return True
+    shell_fragment_markers = (
+        ">/dev/null",
+        "2>/dev",
+        "&&",
+        "| head",
+        "xargs ",
+        "grep -l",
+        "python3 -c",
+        "find /home/",
+        "ls /home/",
+    )
+    if any(marker in stripped for marker in shell_fragment_markers):
+        return True
+    return False
+
+
 def is_discussion_status_line(line: str) -> bool:
     stripped = line.strip()
     compact = re.sub(r"\s+", "", stripped).lower()
     if not compact:
         return False
+    if is_discussion_approval_line(stripped) or is_discussion_tool_noise_line(stripped):
+        return True
     if stripped[0] in {"✢", "✶", "✻", "✽", "·", "*"} and ("…" in stripped or "..." in stripped or "tokens" in stripped):
         return True
     if stripped.startswith("⎿ "):
@@ -1319,6 +1848,8 @@ def is_fragmented_discussion_noise(line: str) -> bool:
     stripped = line.strip()
     if not stripped:
         return False
+    if is_discussion_approval_line(stripped) or is_discussion_tool_noise_line(stripped):
+        return True
     if stripped in {"~", "=", ","}:
         return True
     if stripped.startswith("+ "):
@@ -1384,7 +1915,12 @@ def is_plausible_assistant_content_line(line: str) -> bool:
     stripped = normalize_discussion_text_line(line)
     if not stripped:
         return False
-    if is_discussion_status_line(stripped) or is_fragmented_discussion_noise(stripped):
+    if (
+        is_discussion_status_line(stripped)
+        or is_fragmented_discussion_noise(stripped)
+        or is_discussion_approval_line(stripped)
+        or is_discussion_tool_noise_line(stripped)
+    ):
         return False
     if re.match(r"^(-|\*|•|\d+\.)\s", stripped):
         return True
@@ -1425,6 +1961,8 @@ def sanitize_assistant_turn_against_user_turns(message: str, user_turns: list[st
         if not stripped:
             if sanitized_lines and sanitized_lines[-1] != "":
                 sanitized_lines.append("")
+            continue
+        if is_discussion_approval_line(stripped) or is_discussion_tool_noise_line(stripped):
             continue
         if re.match(r"^(-|\*|•|\d+\.)\s", stripped) or stripped.endswith("?"):
             sanitized_lines.append(stripped)
@@ -1633,6 +2171,23 @@ Discussion transcript:
 """
 
 
+def is_valid_discussion_summary(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped:
+        return False
+    compact = re.sub(r"\s+", "", stripped).lower()
+    if "requiresapproval" in compact or "grantpermissionto" in compact:
+        return False
+
+    search_start = 0
+    for header in DISCUSSION_REQUIRED_SECTIONS:
+        index = stripped.find(header, search_start)
+        if index < 0:
+            return False
+        search_start = index + len(header)
+    return True
+
+
 def build_codex_prompt(
     paths: WorkflowPaths,
     manifest: dict[str, Any],
@@ -1682,6 +2237,8 @@ Required behavior:
 - Make the necessary repository changes.
 - Run the verification listed for this step.
 - If the first attempt fails but the failure appears fixable from this repository, repair the issue and rerun verification within the same step instead of stopping at the first error.
+- If verification fails because a public prerequisite is missing but the repository contains a documented or scriptable way to fetch or materialize it, implement that prerequisite staging in the workflow and rerun instead of treating it as immediate operator work.
+- Prefer committed, idempotent setup helpers over one-off shell history. If a prerequisite is large, make the setup resumable and cache-aware so later workflow runs do not repeat the download or extraction.
 - Reserve requests for human intervention for cases that truly require operator action outside the repository, such as missing permissions, credentials, cluster allocation, or external services you cannot control.
 - Append a new section to `{paths.results_md}` titled `Step {step['id']} - {step['title']}`.
 - In that section include: summary of changes, files changed, verification performed, outcome, and any remaining risks.
@@ -1749,6 +2306,7 @@ Return JSON only with this schema:
 Approve only if the step is implemented and verified well enough to move on.
 Set `human_intervention_required` to `true` only when the blocker clearly requires operator action outside the repository, such as missing permissions, credentials, unavailable external services, or unavailable hardware/resource allocation that the workflow cannot repair itself.
 Set `human_intervention_required` to `false` for workflow bugs, stale assumptions, launcher/sandbox mismatches, missing retries, weak diagnostics, bad scripts, or other issues that a replanned repository change could fix in a later loop iteration.
+Set `human_intervention_required` to `false` when the failure is a missing public checkpoint, dataset, asset bundle, or package that can be fetched or materialized by adding repository-local automation, even if the first attempt did not yet include that automation.
 """
 
 
@@ -2108,6 +2666,18 @@ def run_discussion_session(paths: WorkflowPaths, config: dict[str, Any], task_su
     summary_text = summary_result.stdout.strip()
     if not summary_text:
         raise WorkflowError("Discussion summary command returned empty output.")
+    if not is_valid_discussion_summary(summary_text):
+        raise WorkflowError(
+            summarize_command_failure(
+                paths,
+                stage="discussion_summary_invalid",
+                message=(
+                    "Discussion summary output did not match the required structured format. "
+                    "The existing discussion.md was preserved."
+                ),
+                result=summary_result,
+            )
+        )
     paths.discussion_md.write_text(summary_text.rstrip() + "\n", encoding="utf-8")
     after_text = paths.discussion_md.read_text(encoding="utf-8")
     return after_text != before_text
@@ -2544,6 +3114,31 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help="Only initialize the workspace files; do not launch the interactive kickoff discussion.",
     )
+    init_parser.add_argument(
+        "--migrate-from-workspace",
+        default="",
+        help="Import context from an existing workflow workspace before starting discussion.",
+    )
+    init_parser.add_argument(
+        "--skip-migrate-runtime-env",
+        action="store_true",
+        help="When used with --migrate-from-workspace, do not copy runtime.env from the source workspace.",
+    )
+
+    migrate_parser = subparsers.add_parser(
+        "migrate",
+        help="Create a fresh workflow workspace from an existing workflow workspace.",
+    )
+    migrate_parser.add_argument(
+        "--from-workspace",
+        required=True,
+        help="Existing workflow workspace to summarize and import.",
+    )
+    migrate_parser.add_argument(
+        "--skip-runtime-env",
+        action="store_true",
+        help="Do not copy runtime.env from the source workspace into the new workspace.",
+    )
 
     subparsers.add_parser("plan", help="Generate or refresh plan.md using the configured planner.")
 
@@ -2576,9 +3171,22 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "init":
             task_md_already_exists = paths.task_md.exists()
             related_links = normalize_related_links(args.related_link)
-            if not task_md_already_exists and not related_links and sys.stdin.isatty():
-                related_links = prompt_for_related_links()
-            ensure_workflow_files(paths, task_summary=args.task_summary, related_links=related_links)
+            migration_source = args.migrate_from_workspace.strip()
+            migrated_during_init = False
+
+            if migration_source:
+                source_paths = WorkflowPaths(root=Path(migration_source).resolve())
+                run_migration(
+                    paths,
+                    source_paths=source_paths,
+                    copy_runtime_env=not args.skip_migrate_runtime_env,
+                )
+                task_md_already_exists = True
+                migrated_during_init = True
+            else:
+                if not task_md_already_exists and not related_links and sys.stdin.isatty():
+                    related_links = prompt_for_related_links()
+                ensure_workflow_files(paths, task_summary=args.task_summary, related_links=related_links)
             planner_model = args.planner_model.strip() or args.model.strip()
             reviewer_model = args.reviewer_model.strip() or args.model.strip()
             discussion_model = args.discussion_model.strip() or args.model.strip()
@@ -2594,9 +3202,12 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 apply_runtime_env_overrides(runtime_model_overrides)
             print(f"Initialized workflow workspace at {paths.root}")
+            if migrated_during_init:
+                print(f"Imported migration handoff from {Path(migration_source).resolve()}")
+                print(f"Saved migration summary in {paths.migration_md}")
             if any(runtime_model_overrides.values()):
                 print(f"Saved workspace model overrides in {paths.root / 'runtime.env'}")
-            if task_md_already_exists:
+            if task_md_already_exists and not migrated_during_init:
                 print(f"Kept existing {paths.task_md}; related links prompt was skipped.")
             if args.no_discussion:
                 return 0
@@ -2611,6 +3222,17 @@ def main(argv: list[str] | None = None) -> int:
             discussion_changed = run_discussion_session(paths, config, args.task_summary)
             if discussion_changed:
                 print(f"Updated {paths.discussion_md}")
+            return 0
+
+        if args.command == "migrate":
+            source_paths = WorkflowPaths(root=Path(args.from_workspace).resolve())
+            run_migration(
+                paths,
+                source_paths=source_paths,
+                copy_runtime_env=not args.skip_runtime_env,
+            )
+            print(f"Migrated workflow workspace to {paths.root}")
+            print(f"Imported handoff summary written to {paths.migration_md}")
             return 0
 
         ensure_workflow_files(paths)
