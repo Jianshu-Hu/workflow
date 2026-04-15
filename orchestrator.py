@@ -446,6 +446,7 @@ Session requirements:
 - Start by restating the current task summary and asking the user what research problem or implementation goal they want to solve.
 - Your first substantive reply must contain at least one targeted follow-up question for the user.
 - Do not reply with only a promise like "I’ll read/open/update/check this". If you take an action, report the result briefly after the action.
+- Never send a standalone progress-only message such as "Let me check/read/look at X". If you inspect something, do it first and then reply with the concrete finding plus at least one targeted question or decision-relevant summary.
 - Do not treat this session as an execution task, implementation task, or autonomous research run. The primary deliverable here is a useful discussion transcript that can be summarized into `{paths.discussion_md.name}` plus clarified open questions and next actions.
 - Use the chat to explore goals, constraints, prior attempts, risks, candidate approaches, evaluation criteria, and unknowns.
 - Do not generate or rewrite `{paths.plan_md.name}` in this kickoff discussion.

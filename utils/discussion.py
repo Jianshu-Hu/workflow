@@ -358,6 +358,61 @@ def is_substantive_assistant_turn(message: str) -> bool:
     return len(words) >= 12
 
 
+def is_low_value_assistant_turn(message: str) -> bool:
+    text = normalize_assistant_message_lines(message.splitlines())
+    if not text:
+        return True
+    if "?" in text or "\n- " in text or "\n1. " in text:
+        return False
+
+    compact = re.sub(r"\s+", " ", text).strip().lower()
+    words = re.findall(r"[A-Za-z]{2,}", compact)
+    if len(words) > 28:
+        return False
+
+    progress_phrases = (
+        "let me ",
+        "now let me ",
+        "i'll ",
+        "i will ",
+        "i need to ",
+    )
+    action_markers = (
+        "check ",
+        "read ",
+        "look ",
+        "inspect ",
+        "verify ",
+        "ground ",
+        "understand ",
+        "see ",
+    )
+    framing_markers = (
+        "good",
+        "great",
+        "okay",
+        "ok",
+        "excellent",
+        "that's clear",
+        "that clarifies",
+        "this is useful",
+    )
+
+    if any(phrase in compact for phrase in progress_phrases) and any(marker in compact for marker in action_markers):
+        return True
+
+    sentence_like = [part.strip() for part in re.split(r"[.!?]+", compact) if part.strip()]
+    if not sentence_like:
+        return True
+    if len(sentence_like) <= 2 and all(
+        any(marker in sentence for marker in action_markers) or sentence in framing_markers
+        for sentence in sentence_like
+    ):
+        return True
+
+    return False
+
+
 def discussion_word_set(text: str) -> set[str]:
     return {word.lower() for word in re.findall(r"[A-Za-z]{3,}", text)}
 
@@ -483,7 +538,7 @@ def build_discussion_transcript(paths: WorkflowPaths) -> str:
             for sanitized in (
                 sanitize_assistant_turn_against_user_turns(turn, user_turns) for turn in assistant_turns
             )
-            if sanitized and is_substantive_assistant_turn(sanitized)
+            if sanitized and is_substantive_assistant_turn(sanitized) and not is_low_value_assistant_turn(sanitized)
         ]
 
     sections = ["# Discussion Transcript", ""]
@@ -551,6 +606,8 @@ Use the transcript as the ground truth. Preserve concrete user decisions, constr
 If the transcript contains assistant claims about edits or actions that were not actually performed, ignore those claims and summarize only the substantive discussion content.
 
 Requirements:
+- You are generating text for stdout only. Do not edit files, do not ask for permission, and do not mention permissions, tools, or approvals.
+- Treat references to `{paths.discussion_md.name}` as the target document name, not as an instruction to perform a file write.
 - Return the full contents of `{paths.discussion_md.name}` only. No surrounding explanation.
 - Organize the file with these sections in order:
   1. `# Discussion`
@@ -567,6 +624,11 @@ Requirements:
 - Include related links or references only if they were discussed or are already present in the task file.
 - Do not invent facts that are not supported by the transcript or task file.
 - If the transcript is ambiguous, capture that ambiguity as an open question instead of guessing.
+- Only treat something as a durable fact when it is either an explicit user statement or a directly verified observation described in the transcript with concrete evidence.
+- Do not upgrade assistant reasoning, code-path interpretation, or planning language into a settled fact unless the transcript clearly says it was verified.
+- If a useful technical conclusion appears to be an inference rather than a verified fact, either prefix that bullet with `Inference:` under `## Current Understanding` or move it to `## Open Questions`.
+- Put items in `## Constraints`, `## Rejected Ideas`, and `## Next Actions` only when they are grounded in explicit user decisions or clear transcript evidence.
+- Avoid absolute phrasing such as `never`, `always`, `sole job`, or `no new implementation is needed` unless the transcript explicitly supports it.
 
 Model hint: use {model_hint} level reasoning for synthesis, but keep the output practical and compact.
 

@@ -55,7 +55,7 @@ class WorkflowPaths:
 
     @property
     def repo_root(self) -> Path:
-        return Path(__file__).resolve().parent.parent
+        return Path(__file__).resolve().parents[2]
 
     @property
     def task_md(self) -> Path:

@@ -25,4 +25,12 @@ if [[ ! -f "${prompt_file}" ]]; then
 fi
 
 # Feed the prompt on stdin so large workflow prompts do not overflow argv.
-exec claude --print --output-format text --model "${claude_model}" < "${prompt_file}"
+# Disable tools for noninteractive workflow stages so Claude emits plain text
+# output instead of attempting edits or permission-gated tool actions.
+exec claude \
+  --print \
+  --output-format text \
+  --model "${claude_model}" \
+  --permission-mode bypassPermissions \
+  --tools "" \
+  < "${prompt_file}"
