@@ -96,6 +96,133 @@ resolve_workspace_dir() {
   fi
 }
 
+detect_provider_from_hint() {
+  local hint="${1:-}"
+
+  hint=$(printf '%s' "${hint}" | tr '[:upper:]' '[:lower:]')
+
+  case "${hint}" in
+    *claude*|*sonnet*|*opus*|*haiku*)
+      printf 'claude\n'
+      return 0
+      ;;
+    *gemini*)
+      printf 'gemini\n'
+      return 0
+      ;;
+  esac
+
+  return 1
+}
+
+detect_provider_from_runtime_env() {
+  local runtime_env_path="$1"
+  local line
+  local variable_name
+  local variable_value
+  local provider=""
+
+  if [[ ! -f "${runtime_env_path}" ]]; then
+    return 1
+  fi
+
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    case "${line}" in
+      export\ *=*|*=*)
+        ;;
+      *)
+        continue
+        ;;
+    esac
+
+    line="${line#export }"
+    variable_name="${line%%=*}"
+    variable_value="${line#*=}"
+
+    case "${variable_name}" in
+      WORKFLOW_*MODEL)
+        ;;
+      *)
+        continue
+        ;;
+    esac
+
+    provider=$(detect_provider_from_hint "${variable_name}" || true)
+    if [[ -n "${provider}" ]]; then
+      printf '%s\n' "${provider}"
+      return 0
+    fi
+
+    variable_value="${variable_value%\"}"
+    variable_value="${variable_value#\"}"
+    variable_value="${variable_value%\'}"
+    variable_value="${variable_value#\'}"
+
+    provider=$(detect_provider_from_hint "${variable_value}" || true)
+    if [[ -n "${provider}" ]]; then
+      printf '%s\n' "${provider}"
+      return 0
+    fi
+  done < "${runtime_env_path}"
+
+  return 1
+}
+
+detect_provider_from_environment() {
+  local variable_name
+  local variable_value
+  local provider=""
+
+  for variable_name in \
+    WORKFLOW_PLANNER_MODEL \
+    WORKFLOW_REVIEWER_MODEL \
+    WORKFLOW_DISCUSSION_MODEL \
+    WORKFLOW_GEMINI_MODEL \
+    WORKFLOW_GEMINI_DISCUSSION_MODEL \
+    WORKFLOW_CLAUDE_MODEL \
+    WORKFLOW_CLAUDE_DISCUSSION_MODEL
+  do
+    variable_value="${!variable_name:-}"
+    if [[ -z "${variable_value}" ]]; then
+      continue
+    fi
+
+    provider=$(detect_provider_from_hint "${variable_name}" || true)
+    if [[ -n "${provider}" ]]; then
+      printf '%s\n' "${provider}"
+      return 0
+    fi
+
+    provider=$(detect_provider_from_hint "${variable_value}" || true)
+    if [[ -n "${provider}" ]]; then
+      printf '%s\n' "${provider}"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+resolve_default_config_path() {
+  local workflow_root_local="$1"
+  local workspace_dir_local="$2"
+  local provider=""
+
+  provider=$(detect_provider_from_runtime_env "${workspace_dir_local}/runtime.env" || true)
+  if [[ -z "${provider}" ]]; then
+    provider=$(detect_provider_from_environment || true)
+  fi
+
+  case "${provider}" in
+    claude)
+      printf '%s\n' "${workflow_root_local}/configs/config.claude.example.yaml"
+      ;;
+    *)
+      printf '%s\n' "${workflow_root_local}/configs/config.gemini.example.yaml"
+      ;;
+  esac
+}
+
 prepare_detached_workspace() {
   local workspace_dir_local="$1"
   local log_file="$2"
@@ -143,11 +270,12 @@ fi
 workflow_root=$(cd "${script_dir}/.." && pwd)
 repo_root=${WORKFLOW_REPO_ROOT:-$(cd "${workflow_root}/.." && pwd)}
 python_bin=${WORKFLOW_PYTHON:-python}
-config_path=${WORKFLOW_CONFIG:-${workflow_root}/configs/config.gemini.example.yaml}
 default_workspace=${WORKFLOW_WORKSPACE:-workflow_runs/default}
 cli_workspace=$(extract_cli_option_value --workspace "$@" || true)
 workspace_path=${cli_workspace:-${default_workspace}}
 workspace_dir=$(resolve_workspace_dir "${repo_root}" "${workspace_path}")
+cli_config=$(extract_cli_option_value --config "$@" || true)
+config_path=${cli_config:-${WORKFLOW_CONFIG:-$(resolve_default_config_path "${workflow_root}" "${workspace_dir}")}}
 bootstrap_cmd=${WORKFLOW_BOOTSTRAP_CMD:-}
 preflight_cmd=${WORKFLOW_PREFLIGHT_CMD:-}
 workflow_command=$(resolve_workflow_command "$@" || true)
@@ -223,6 +351,8 @@ fi
 
 if [[ $# -eq 0 ]]; then
   set -- --workspace "${default_workspace}" --config "${config_path}" loop
+elif [[ -z "${cli_config}" ]]; then
+  set -- --config "${config_path}" "$@"
 fi
 
 exec "${python_bin}" "${workflow_root}/orchestrator.py" "$@"
