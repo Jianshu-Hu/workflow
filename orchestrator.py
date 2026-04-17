@@ -25,6 +25,7 @@ from utils.common import (
     config_int,
     load_runtime_env_file,
     load_state,
+    load_artifact_index,
     load_yaml_file,
     normalize_related_links,
     parse_bool,
@@ -33,6 +34,7 @@ from utils.common import (
     render_task_template,
     runtime_context,
     save_state,
+    save_artifact_index,
     update_state_timestamp,
     upsert_runtime_env_file,
     utc_now,
@@ -99,6 +101,15 @@ def ensure_workflow_files(
     if not paths.progress_md.exists():
         paths.progress_md.write_text(PROGRESS_TEMPLATE + "\n", encoding="utf-8")
 
+    if not paths.artifact_index_json.exists():
+        save_artifact_index(
+            paths.artifact_index_json,
+            {
+                "updated_at": utc_now(),
+                "artifacts": [],
+            },
+        )
+
     if not paths.state_json.exists():
         initial_state = {
             "created_at": utc_now(),
@@ -128,6 +139,8 @@ def ensure_workflow_files(
                 changed = True
         if changed:
             save_state(paths.state_json, state)
+
+    index_existing_workspace_artifacts(paths)
 
 
 def refresh_placeholder_workspace(
@@ -210,6 +223,119 @@ def append_results_section(results_path: Path, heading: str, body: str) -> None:
         handle.write(f"\n## {heading}\n\n{body.rstrip()}\n")
 
 
+def append_results_section_with_index(
+    paths: WorkflowPaths,
+    heading: str,
+    body: str,
+    *,
+    step_id: str | None = None,
+) -> None:
+    append_results_section(paths.results_md, heading, body)
+    append_artifact_record(
+        paths,
+        category="results_section",
+        path=paths.results_md,
+        label=heading,
+        step_id=step_id,
+        metadata={"heading": heading},
+    )
+
+
+def append_artifact_record(
+    paths: WorkflowPaths,
+    *,
+    category: str,
+    path: Path,
+    label: str,
+    step_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    index = load_artifact_index(paths.artifact_index_json)
+    artifacts = index.setdefault("artifacts", [])
+    artifacts.append(
+        {
+            "timestamp": utc_now(),
+            "category": category,
+            "label": label,
+            "path": str(path.resolve()),
+            "step_id": step_id,
+            "metadata": metadata or {},
+        }
+    )
+    index["artifacts"] = artifacts[-200:]
+    index["updated_at"] = utc_now()
+    save_artifact_index(paths.artifact_index_json, index)
+
+
+def artifact_index_summary(paths: WorkflowPaths, *, max_entries: int = 12) -> str:
+    index = load_artifact_index(paths.artifact_index_json)
+    entries = index.get("artifacts", [])
+    if not entries:
+        return "No indexed artifacts yet."
+
+    lines: list[str] = []
+    for entry in entries[-max_entries:]:
+        if not isinstance(entry, dict):
+            continue
+        label = str(entry.get("label", "artifact"))
+        category = str(entry.get("category", "unknown"))
+        path = str(entry.get("path", ""))
+        step_id = str(entry.get("step_id", "") or "")
+        prefix = f"- [{category}] {label}"
+        if step_id:
+            prefix += f" (step `{step_id}`)"
+        if path:
+            prefix += f": {path}"
+        lines.append(prefix)
+
+    return "\n".join(lines) if lines else "No indexed artifacts yet."
+
+
+def index_existing_workspace_artifacts(paths: WorkflowPaths) -> None:
+    index = load_artifact_index(paths.artifact_index_json)
+    artifacts = index.setdefault("artifacts", [])
+    existing_paths = {
+        str(item.get("path"))
+        for item in artifacts
+        if isinstance(item, dict) and item.get("path")
+    }
+
+    known_artifacts: list[tuple[str, Path, str, dict[str, Any]]] = []
+    if paths.discussion_input_log.exists():
+        known_artifacts.append(("discussion_input", paths.discussion_input_log, "discussion input log", {}))
+    if paths.discussion_output_log.exists():
+        known_artifacts.append(("discussion_output", paths.discussion_output_log, "discussion output log", {}))
+    if paths.discussion_transcript.exists():
+        known_artifacts.append(("discussion_transcript", paths.discussion_transcript, "discussion transcript", {}))
+    for path in sorted(paths.command_artifacts_dir.glob("*.stdout.txt")):
+        known_artifacts.append(("command_failure_stdout", path, path.name, {}))
+    for path in sorted(paths.command_artifacts_dir.glob("*.stderr.txt")):
+        known_artifacts.append(("command_failure_stderr", path, path.name, {}))
+
+    changed = False
+    for category, path, label, metadata in known_artifacts:
+        resolved_path = str(path.resolve())
+        if resolved_path in existing_paths:
+            continue
+        artifacts.append(
+            {
+                "timestamp": utc_now(),
+                "category": category,
+                "label": label,
+                "path": resolved_path,
+                "step_id": None,
+                "metadata": metadata,
+            }
+        )
+        existing_paths.add(resolved_path)
+        changed = True
+
+    if changed:
+        index["artifacts"] = artifacts[-200:]
+        index["updated_at"] = utc_now()
+        save_artifact_index(paths.artifact_index_json, index)
+
+
 def format_command_failure(
     message: str,
     result: subprocess.CompletedProcess[str],
@@ -243,6 +369,22 @@ def write_command_failure_artifacts(
     stderr_path = paths.command_artifacts_dir / f"{base_name}.stderr.txt"
     stdout_path.write_text(result.stdout, encoding="utf-8")
     stderr_path.write_text(result.stderr, encoding="utf-8")
+    append_artifact_record(
+        paths,
+        category="command_failure_stdout",
+        path=stdout_path,
+        label=f"{stage} stdout",
+        step_id=step_id,
+        metadata={"stage": stage},
+    )
+    append_artifact_record(
+        paths,
+        category="command_failure_stderr",
+        path=stderr_path,
+        label=f"{stage} stderr",
+        step_id=step_id,
+        metadata={"stage": stage},
+    )
     return stdout_path, stderr_path
 
 
@@ -685,6 +827,11 @@ Results file:
 {results_text.strip()}
 ```
 
+Indexed artifacts:
+```text
+{artifact_index_summary(paths)}
+```
+
 Current progress file:
 ```markdown
 {progress_text.strip()}
@@ -764,6 +911,11 @@ Plan file:
 Results file:
 ```markdown
 {results_text.strip()}
+```
+
+Indexed artifacts:
+```text
+{artifact_index_summary(paths)}
 ```
 
 Existing progress file:
@@ -956,8 +1108,8 @@ def run_planner(paths: WorkflowPaths, config: dict[str, Any]) -> None:
     save_plan_manifest(paths.plan_md, manifest, planner_output)
 
     update_state_timestamp(paths.state_json, "last_planner_run_at")
-    append_results_section(
-        paths.results_md,
+    append_results_section_with_index(
+        paths,
         "Planner Update",
         f"Generated or refreshed `{paths.plan_md.name}` at {utc_now()}.",
     )
@@ -1166,10 +1318,11 @@ def run_review(paths: WorkflowPaths, config: dict[str, Any], step_id: str | None
                 review.human_intervention_reason or review.summary,
             ]
         )
-    append_results_section(
-        paths.results_md,
+    append_results_section_with_index(
+        paths,
         f"Review - {step['id']}",
         "\n".join(review_body),
+        step_id=step["id"],
     )
 
     if review.approved:
@@ -1217,8 +1370,8 @@ def run_auto_replan(
     attempt: int,
     max_attempts: int,
 ) -> None:
-    append_results_section(
-        paths.results_md,
+    append_results_section_with_index(
+        paths,
         f"Auto Replan - {step['id']}",
         "\n".join(
             [
@@ -1236,6 +1389,7 @@ def run_auto_replan(
                 *([f"- {item}" for item in review.required_changes] or ["- None provided."]),
             ]
         ),
+        step_id=step["id"],
     )
     run_planner(paths, config)
     manifest, _ = load_plan_manifest(paths.plan_md)

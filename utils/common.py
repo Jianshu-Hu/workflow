@@ -86,6 +86,10 @@ class WorkflowPaths:
         return self.root / "state.json"
 
     @property
+    def artifact_index_json(self) -> Path:
+        return self.root / "artifact_index.json"
+
+    @property
     def prompts_dir(self) -> Path:
         return self.root / "prompts"
 
@@ -124,6 +128,22 @@ class StepResult:
 
 class WorkflowError(RuntimeError):
     """Raised for workflow-specific failures."""
+
+
+def load_artifact_index(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {"artifacts": []}
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise WorkflowError(f"Artifact index must be a JSON object: {path}")
+    artifacts = data.get("artifacts", [])
+    if not isinstance(artifacts, list):
+        raise WorkflowError(f"Artifact index 'artifacts' field must be a list: {path}")
+    return data
+
+
+def save_artifact_index(path: Path, data: dict[str, Any]) -> None:
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
 def normalize_related_links(related_links: list[str] | None) -> list[str]:

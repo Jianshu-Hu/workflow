@@ -152,6 +152,7 @@ What `migrate` does:
 - `plan.md`: generated workflow plan plus compact manifest-backed overview
 - `results.md`: append-only execution and review log
 - `progress.md`: deterministic resume checkpoint
+- `artifact_index.json`: structured index of recent workflow artifacts such as results sections, discussion logs, and command failure outputs
 - `artifacts/`: raw logs and failure artifacts
 - `runtime.env`: per-workspace model overrides
 
@@ -198,3 +199,11 @@ python workflow/orchestrator.py --workspace workflow_runs/my-task --config workf
 ```bash
 python workflow/orchestrator.py --workspace workflow_runs/default --config workflow/configs/config.gemini.example.yaml loop
 ```
+
+## Outcome Follow-Ups
+
+Reviews can now approve a step while still marking its outcome as `fail` or `inconclusive`.
+This is useful for benchmarks and evaluations where the run completed, but the measured result is still unacceptable or ambiguous.
+
+When a step is approved with `outcome_status=fail`, the workflow automatically inserts a follow-up investigation step if one does not already exist.
+That keeps failed benchmark results visible as explicit workflow work instead of burying them only in `results.md`.

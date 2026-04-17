@@ -20,6 +20,24 @@ APPROVED_STEP_SUMMARY_CHARS = 500
 RESULTS_SUMMARY_CHARS = 400
 
 
+def _normalize_followup_step_id(source_step_id: str) -> str:
+    return f"followup-{source_step_id}"
+
+
+def _default_followup_title(step: dict[str, Any]) -> str:
+    return f"Investigate failed outcome for {step['title']}"
+
+
+def _default_followup_objective(step: dict[str, Any]) -> str:
+    outcome_reason = str(step.get("outcome_reason", "")).strip()
+    summary = outcome_reason or "The approved step completed but produced an unacceptable outcome."
+    return (
+        "Investigate the failed approved outcome, determine the likely cause, "
+        "and either implement a remediation or document why the benchmark/result remains unsatisfied. "
+        f"Current failure signal: {summary}"
+    )
+
+
 def render_manifest(manifest: dict[str, Any]) -> str:
     yaml_text = yaml.safe_dump(manifest, sort_keys=False, allow_unicode=False).strip()
     return "\n".join(
@@ -376,6 +394,53 @@ def approve_step(
             "timestamp": utc_now(),
         }
     )
+
+    if outcome_status == "fail":
+        followup_step_id = _normalize_followup_step_id(step_id)
+        existing_followup = next(
+            (
+                candidate
+                for candidate in manifest["steps"]
+                if candidate.get("id") == followup_step_id
+            ),
+            None,
+        )
+        if existing_followup is None:
+            insert_at = next(
+                (index for index, candidate in enumerate(manifest["steps"]) if candidate["id"] == step_id),
+                len(manifest["steps"]) - 1,
+            )
+            followup_step = {
+                "id": followup_step_id,
+                "title": _default_followup_title(step),
+                "status": "pending",
+                "objective": _default_followup_objective(step),
+                "acceptance_criteria": [
+                    "Root cause or strongest hypothesis is documented with direct evidence.",
+                    "A concrete remediation is implemented and verified, or the remaining blocker is clearly documented.",
+                    "Results.md references the decisive artifacts used for the investigation.",
+                ],
+                "implementation": [
+                    "Inspect the latest failed benchmark/evaluation artifacts.",
+                    "Identify the likely cause of the failed outcome.",
+                    "Implement a remediation or document why the failure remains unresolved.",
+                ],
+                "verification": [
+                    "Confirm the investigation references the latest relevant artifacts.",
+                    "Run the smallest validation that proves whether the remediation changed the failed outcome.",
+                ],
+            }
+            manifest["steps"].insert(insert_at + 1, followup_step)
+            manifest.setdefault("history", []).append(
+                {
+                    "step_id": followup_step_id,
+                    "event": "followup_added",
+                    "details": (
+                        f"Automatically added follow-up step after approved outcome_status=fail on '{step_id}'."
+                    ),
+                    "timestamp": utc_now(),
+                }
+            )
 
     next_step_id = None
     for candidate in manifest["steps"]:
