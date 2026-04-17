@@ -203,6 +203,19 @@ detect_provider_from_environment() {
   return 1
 }
 
+run_hook_command() {
+  local label="$1"
+  shift
+  local command=("$@")
+
+  if [[ "${#command[@]}" -eq 0 ]]; then
+    return 0
+  fi
+
+  echo "[workflow] running ${label}: ${command[*]}"
+  "${command[@]}"
+}
+
 resolve_default_config_path() {
   local workflow_root_local="$1"
   local workspace_dir_local="$2"
@@ -278,6 +291,8 @@ cli_config=$(extract_cli_option_value --config "$@" || true)
 config_path=${cli_config:-${WORKFLOW_CONFIG:-$(resolve_default_config_path "${workflow_root}" "${workspace_dir}")}}
 bootstrap_cmd=${WORKFLOW_BOOTSTRAP_CMD:-}
 preflight_cmd=${WORKFLOW_PREFLIGHT_CMD:-}
+bootstrap_script=${WORKFLOW_BOOTSTRAP_SCRIPT:-}
+preflight_script=${WORKFLOW_PREFLIGHT_SCRIPT:-}
 workflow_command=$(resolve_workflow_command "$@" || true)
 
 cd "${repo_root}"
@@ -307,8 +322,10 @@ if [[ "${WORKFLOW_DETACHED:-0}" != "1" && "${WORKFLOW_DETACH:-1}" == "1" ]]; the
   fi
 fi
 
-if [[ -n "${bootstrap_cmd}" ]]; then
-  echo "[workflow] running bootstrap command"
+if [[ -n "${bootstrap_script}" ]]; then
+  run_hook_command "bootstrap script" "${bootstrap_script}"
+elif [[ -n "${bootstrap_cmd}" ]]; then
+  echo "[workflow] running bootstrap command via legacy shell hook"
   eval "${bootstrap_cmd}"
 fi
 
@@ -339,14 +356,19 @@ if command -v nvidia-smi >/dev/null 2>&1; then
   nvidia-smi -L || true
 fi
 
-if [[ -n "${preflight_cmd}" && "${WORKFLOW_SKIP_RENDER_PREFLIGHT:-0}" != "1" ]]; then
-  echo "[workflow] running host preflight: ${preflight_cmd}"
-  bash -lc "${preflight_cmd}"
-  export WORKFLOW_RENDER_PREFLIGHT_STATUS="passed"
+if [[ "${WORKFLOW_SKIP_RENDER_PREFLIGHT:-0}" != "1" ]]; then
+  if [[ -n "${preflight_script}" ]]; then
+    run_hook_command "host preflight script" "${preflight_script}"
+    export WORKFLOW_RENDER_PREFLIGHT_STATUS="passed"
+  elif [[ -n "${preflight_cmd}" ]]; then
+    echo "[workflow] running host preflight via legacy shell hook: ${preflight_cmd}"
+    bash -lc "${preflight_cmd}"
+    export WORKFLOW_RENDER_PREFLIGHT_STATUS="passed"
+  else
+    export WORKFLOW_RENDER_PREFLIGHT_STATUS="not-configured"
+  fi
 elif [[ "${WORKFLOW_SKIP_RENDER_PREFLIGHT:-0}" == "1" ]]; then
   export WORKFLOW_RENDER_PREFLIGHT_STATUS="skipped"
-else
-  export WORKFLOW_RENDER_PREFLIGHT_STATUS="not-configured"
 fi
 
 if [[ $# -eq 0 ]]; then

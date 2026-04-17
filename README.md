@@ -169,22 +169,25 @@ The Gemini and Claude wrappers read prompts from files so large prompts do not o
 
 `workflow/scripts/run_workflow.sh` supports two useful environment hooks:
 
-- `WORKFLOW_BOOTSTRAP_CMD`: runs before the orchestrator starts. Use this for idempotent setup such as activating caches, downloading known public prerequisites, syncing asset mirrors, or materializing generated config files.
-- `WORKFLOW_PREFLIGHT_CMD`: runs after the launcher prints host details but before the workflow loop begins. Use this for fast host validation such as checking GPU visibility, mounted paths, required binaries, or required files/directories.
+- `WORKFLOW_BOOTSTRAP_SCRIPT`: preferred. Runs before the orchestrator starts. Point this at an executable script for idempotent setup such as activating caches, downloading known public prerequisites, syncing asset mirrors, or materializing generated config files.
+- `WORKFLOW_PREFLIGHT_SCRIPT`: preferred. Runs after the launcher prints host details but before the workflow loop begins. Point this at an executable script for fast host validation such as checking GPU visibility, mounted paths, required binaries, or required files/directories.
+- `WORKFLOW_BOOTSTRAP_CMD`: legacy shell-string fallback for bootstrap when a dedicated script is not yet available.
+- `WORKFLOW_PREFLIGHT_CMD`: legacy shell-string fallback for preflight when a dedicated script is not yet available.
 
 Recommended pattern:
 
-- Use `WORKFLOW_BOOTSTRAP_CMD` for actions that can repair missing prerequisites.
+- Use `WORKFLOW_BOOTSTRAP_SCRIPT` for actions that can repair missing prerequisites.
 - Keep those actions idempotent and resumable so repeated workflow runs are cheap.
 - Keep task-specific bootstrap logic outside the `workflow/` submodule, for example in repository-level scripts that the workflow invokes via environment variables.
 - Stage large shared assets into stable paths or caches outside per-run workspaces when possible.
-- Reserve `WORKFLOW_PREFLIGHT_CMD` for quick checks; it should fail fast, not perform long downloads.
+- Reserve `WORKFLOW_PREFLIGHT_SCRIPT` for quick checks; it should fail fast, not perform long downloads.
+- Prefer script hooks over shell-string hooks so quoting is predictable and workflow setup remains easy to audit.
 
 Example:
 
 ```bash
-export WORKFLOW_BOOTSTRAP_CMD='bash scripts/prepare_prereqs.sh'
-export WORKFLOW_PREFLIGHT_CMD='test -f /path/to/required/file && test -d /path/to/required/dir'
+export WORKFLOW_BOOTSTRAP_SCRIPT="$PWD/scripts/prepare_prereqs.sh"
+export WORKFLOW_PREFLIGHT_SCRIPT="$PWD/scripts/preflight_check.sh"
 python workflow/orchestrator.py --workspace workflow_runs/my-task --config workflow/configs/config.gemini.example.yaml loop
 ```
 

@@ -44,10 +44,28 @@ def summarize_step_review(step: dict[str, Any]) -> str:
     return "No review summary recorded."
 
 
+def summarize_step_outcome(step: dict[str, Any]) -> str | None:
+    outcome_status = str(step.get("outcome_status", "")).strip()
+    if not outcome_status:
+        return None
+
+    outcome_reason = str(step.get("outcome_reason", "")).strip()
+    if outcome_reason:
+        return clip_text(
+            f"Outcome `{outcome_status}`: {outcome_reason}",
+            APPROVED_STEP_SUMMARY_CHARS,
+            from_end=True,
+        )
+    return f"Outcome `{outcome_status}`."
+
+
 def render_step_summary(step: dict[str, Any]) -> list[str]:
     lines = [f"- {step_label(step)} [{step.get('status', 'pending')}]"]
     if step.get("status") == "approved":
         lines.append(f"  Review: {summarize_step_review(step)}")
+        outcome_summary = summarize_step_outcome(step)
+        if outcome_summary:
+            lines.append(f"  {outcome_summary}")
     elif step.get("status") == "done":
         lines.append("  Completed.")
     elif step.get("status") == "needs_changes":
@@ -58,6 +76,7 @@ def render_step_summary(step: dict[str, Any]) -> list[str]:
 def render_step_detail(step: dict[str, Any]) -> str:
     implementation_lines = [f"- {item}" for item in step.get("implementation", [])] or ["- None recorded."]
     verification_lines = [f"- {item}" for item in step.get("verification", [])] or ["- None recorded."]
+    acceptance_lines = [f"- {item}" for item in step.get("acceptance_criteria", [])] or ["- None recorded."]
     objective = str(step.get("objective", "")).strip() or "No objective recorded."
     return "\n".join(
         [
@@ -67,6 +86,9 @@ def render_step_detail(step: dict[str, Any]) -> str:
             "",
             "Objective:",
             objective,
+            "",
+            "Acceptance Criteria:",
+            *acceptance_lines,
             "",
             "Implementation:",
             *implementation_lines,
@@ -213,6 +235,23 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
         if not isinstance(verification, list):
             raise WorkflowError(f"Step {step_id} verification must be a list.")
 
+        acceptance_criteria = step.get("acceptance_criteria", [])
+        if not isinstance(acceptance_criteria, list):
+            raise WorkflowError(f"Step {step_id} acceptance_criteria must be a list.")
+
+        outcome_status = step.get("outcome_status")
+        if outcome_status is not None:
+            valid_outcome_statuses = {"pass", "fail", "inconclusive"}
+            if not isinstance(outcome_status, str) or outcome_status not in valid_outcome_statuses:
+                raise WorkflowError(
+                    f"Step {step_id} has unsupported outcome_status {outcome_status!r}. "
+                    f"Expected one of: {sorted(valid_outcome_statuses)}."
+                )
+
+        outcome_reason = step.get("outcome_reason")
+        if outcome_reason is not None and not isinstance(outcome_reason, str):
+            raise WorkflowError(f"Step {step_id} outcome_reason must be a string when present.")
+
 
 def compact_manifest_for_storage(manifest: dict[str, Any]) -> dict[str, Any]:
     compact = copy.deepcopy(manifest)
@@ -231,6 +270,8 @@ def compact_manifest_for_storage(manifest: dict[str, Any]) -> dict[str, Any]:
         status = step.get("status")
         if isinstance(step.get("review_summary"), str):
             step["review_summary"] = clip_text(step["review_summary"], APPROVED_STEP_SUMMARY_CHARS, from_end=True)
+        if isinstance(step.get("outcome_reason"), str):
+            step["outcome_reason"] = clip_text(step["outcome_reason"], APPROVED_STEP_SUMMARY_CHARS, from_end=True)
         if status in {"approved", "done"}:
             step["implementation"] = []
             step["verification"] = []
@@ -310,16 +351,28 @@ def append_history_event(
     return manifest
 
 
-def approve_step(plan_path: Path, step_id: str, review_summary: str) -> dict[str, Any]:
+def approve_step(
+    plan_path: Path,
+    step_id: str,
+    review_summary: str,
+    *,
+    outcome_status: str = "pass",
+    outcome_reason: str = "",
+) -> dict[str, Any]:
     manifest, plan_text = load_plan_manifest(plan_path)
     step = get_step(manifest, step_id)
     step["status"] = "approved"
     step["review_summary"] = review_summary
+    step["outcome_status"] = outcome_status
+    step["outcome_reason"] = outcome_reason.strip()
     manifest.setdefault("history", []).append(
         {
             "step_id": step_id,
             "event": "approved",
-            "details": review_summary,
+            "details": (
+                f"{review_summary}\nOutcome: {outcome_status}"
+                + (f" - {outcome_reason.strip()}" if outcome_reason.strip() else "")
+            ),
             "timestamp": utc_now(),
         }
     )
@@ -443,8 +496,11 @@ def build_manifest_progress(
         latest_review_lines = [
             f"- **Step:** `{latest_step['id']}`",
             f"- **Approved:** `{str(review.approved).lower()}`",
+            f"- **Outcome Status:** `{review.outcome_status}`",
             f"- **Rationale:** {review.summary}",
         ]
+        if review.outcome_reason:
+            latest_review_lines.append(f"- **Outcome Detail:** {review.outcome_reason}")
     else:
         review_event = latest_history_event(manifest, events={"approved", "changes_requested"})
         if review_event is None:
@@ -465,6 +521,9 @@ def build_manifest_progress(
         if review.human_intervention_required:
             reason = review.human_intervention_reason or review.summary
             open_issues.append(f"- Human intervention required: {reason}")
+    elif review is not None and review.outcome_status != "pass":
+        reason = review.outcome_reason or review.summary
+        open_issues.append(f"- Latest approved step outcome is `{review.outcome_status}`: {reason}")
     elif active_step is not None:
         active_status = active_step.get("status")
         if active_status == "awaiting_review":

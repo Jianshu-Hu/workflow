@@ -348,11 +348,15 @@ Preserve the workflow manifest block markers and keep the YAML manifest machine-
 Requirements:
 - Fill manifest.task with a short task summary.
 - Create ordered steps under manifest.steps.
+- Keep the YAML manifest parseable by `yaml.safe_load`.
+- Use YAML block scalars (`|-`) or quoted strings for any value that spans multiple lines.
+- Do not wrap a plain scalar onto a new line unless it is inside a list item or block scalar.
 - Every step must include:
   - id: stable kebab-case id
   - title: concise label
   - status: set to pending
   - objective: short paragraph
+  - acceptance_criteria: list of concrete conditions that define acceptable outcome for the step
   - implementation: list of concrete build actions
   - verification: list of commands or checks that prove the step is finished
 - If this is the first plan, set manifest.current_step to the first step id and manifest.status to pending.
@@ -404,6 +408,103 @@ Current progress file:
 
 Return the full contents of {paths.plan_md.name} only. No surrounding explanation.
 """
+
+
+def build_planner_repair_prompt(
+    paths: WorkflowPaths,
+    broken_output: str,
+    parse_error: str,
+) -> str:
+    existing_plan = clip_text(paths.plan_md.read_text(encoding="utf-8"), PLAN_PROMPT_CHARS, from_end=True)
+    progress_text = clip_text(paths.progress_md.read_text(encoding="utf-8"), PROGRESS_PROMPT_CHARS, from_end=True)
+    results_text = clip_text(paths.results_md.read_text(encoding="utf-8"), RESULTS_PROMPT_CHARS, from_end=True)
+    return f"""You are repairing malformed workflow plan output from a planner.
+
+The previous planner response could not be parsed as the workflow manifest YAML.
+Repair it into a valid full `{paths.plan_md.name}` document.
+
+Requirements:
+- Preserve the `<!-- WORKFLOW_MANIFEST_START -->` / `<!-- WORKFLOW_MANIFEST_END -->` markers.
+- Preserve the fenced YAML manifest block and make it parseable by `yaml.safe_load`.
+- Return the full contents of `{paths.plan_md.name}` only. No explanation.
+- Keep already approved/completed history intact unless it is obviously malformed.
+- Keep the plan aligned with the latest workflow state from `{paths.progress_md.name}` and `{paths.results_md.name}`.
+- Use YAML block scalars (`|-`) or quoted strings for any multi-line value.
+- Do not insert prose inside the YAML manifest except as valid YAML string content.
+
+Parser error:
+```text
+{parse_error.strip()}
+```
+
+Current plan file:
+```markdown
+{existing_plan.strip()}
+```
+
+Current progress file:
+```markdown
+{progress_text.strip()}
+```
+
+Current results file:
+```markdown
+{results_text.strip()}
+```
+
+Malformed planner output to repair:
+```markdown
+{broken_output.strip()}
+```
+"""
+
+
+def parse_planner_manifest(planner_output: str) -> dict[str, Any]:
+    manifest_text, _, _ = extract_manifest_block(planner_output)
+    manifest = yaml.safe_load(manifest_text) or {}
+    if not isinstance(manifest, dict):
+        raise WorkflowError("Planner output did not contain a valid manifest mapping.")
+    validate_manifest(manifest)
+    if not manifest["steps"]:
+        raise WorkflowError("Planner did not populate any steps in the manifest.")
+    return manifest
+
+
+def run_planner_command(
+    paths: WorkflowPaths,
+    config: dict[str, Any],
+    prompt_text: str,
+) -> str:
+    prompt_path = paths.prompts_dir / "planner_prompt.txt"
+    write_prompt_file(prompt_path, prompt_text)
+
+    command = parse_command_template(
+        planner_command_config(config),
+        prompt_file=str(prompt_path),
+        workspace=str(paths.root),
+        repo_root=str(paths.repo_root),
+        plan=str(paths.plan_md),
+        results=str(paths.results_md),
+        progress=str(paths.progress_md),
+        task=str(paths.task_md),
+        discussion=str(paths.discussion_md),
+        model=planner_model_name(config),
+    )
+    result = run_external_command(command, cwd=paths.root)
+    if result.returncode != 0:
+        raise WorkflowError(
+            summarize_command_failure(
+                paths,
+                stage="planner",
+                message="Planner command failed.",
+                result=result,
+            )
+        )
+
+    planner_output = result.stdout.strip()
+    if not planner_output:
+        raise WorkflowError("Planner command returned empty output.")
+    return planner_output
 
 
 def build_discussion_prompt(paths: WorkflowPaths, task_summary: str = "", config: dict[str, Any] | None = None) -> str:
@@ -597,6 +698,8 @@ Parent workflow runtime snapshot:
 Return JSON only with this schema:
 {{
   "approved": true or false,
+  "outcome_status": "pass" | "fail" | "inconclusive",
+  "outcome_reason": "short explanation of the outcome status",
   "summary": "short review summary",
   "required_changes": ["change 1", "change 2"],
   "human_intervention_required": true or false,
@@ -604,6 +707,8 @@ Return JSON only with this schema:
 }}
 
 Approve only if the step is implemented and verified well enough to move on.
+Set `outcome_status` to `pass` when the step completed and achieved its intended outcome, `fail` when the step executed but the measured outcome is unacceptable, and `inconclusive` when the step completed but the result cannot yet be judged confidently.
+Use `approved=true` with `outcome_status=fail` when the workflow should continue but the poor result must remain visible as a follow-on issue instead of blocking step completion.
 Set `human_intervention_required` to `true` only when the blocker clearly requires operator action outside the repository, such as missing permissions, credentials, unavailable external services, or unavailable hardware/resource allocation that the workflow cannot repair itself.
 Set `human_intervention_required` to `false` for workflow bugs, stale assumptions, launcher/sandbox mismatches, missing retries, weak diagnostics, bad scripts, or other issues that a replanned repository change could fix in a later loop iteration.
 Set `human_intervention_required` to `false` when the failure is a missing public checkpoint, dataset, asset bundle, or package that can be fetched or materialized by adding repository-local automation, even if the first attempt did not yet include that automation.
@@ -673,6 +778,8 @@ Latest review outcome:
         "step_id": step["id"],
         "step_title": step["title"],
         "approved": review.approved,
+        "outcome_status": review.outcome_status,
+        "outcome_reason": review.outcome_reason,
         "summary": review.summary,
         "required_changes": review.required_changes,
         "human_intervention_required": review.human_intervention_required,
@@ -832,43 +939,20 @@ def run_progress_update(paths: WorkflowPaths, config: dict[str, Any], step: dict
 
 def run_planner(paths: WorkflowPaths, config: dict[str, Any]) -> None:
     prompt_text = build_planner_prompt(paths, config)
-    prompt_path = paths.prompts_dir / "planner_prompt.txt"
-    write_prompt_file(prompt_path, prompt_text)
-
-    command = parse_command_template(
-        planner_command_config(config),
-        prompt_file=str(prompt_path),
-        workspace=str(paths.root),
-        repo_root=str(paths.repo_root),
-        plan=str(paths.plan_md),
-        results=str(paths.results_md),
-        progress=str(paths.progress_md),
-        task=str(paths.task_md),
-        discussion=str(paths.discussion_md),
-        model=planner_model_name(config),
-    )
-    result = run_external_command(command, cwd=paths.root)
-    if result.returncode != 0:
-        raise WorkflowError(
-            summarize_command_failure(
-                paths,
-                stage="planner",
-                message="Planner command failed.",
-                result=result,
-            )
-        )
-
-    planner_output = result.stdout.strip()
-    if not planner_output:
-        raise WorkflowError("Planner command returned empty output.")
-
-    manifest_text, _, _ = extract_manifest_block(planner_output)
-    manifest = yaml.safe_load(manifest_text) or {}
-    if not isinstance(manifest, dict):
-        raise WorkflowError("Planner output did not contain a valid manifest mapping.")
-    validate_manifest(manifest)
-    if not manifest["steps"]:
-        raise WorkflowError("Planner did not populate any steps in the manifest.")
+    planner_output = run_planner_command(paths, config, prompt_text)
+    try:
+        manifest = parse_planner_manifest(planner_output)
+    except Exception as exc:
+        repair_prompt = build_planner_repair_prompt(paths, planner_output, str(exc))
+        repaired_output = run_planner_command(paths, config, repair_prompt)
+        try:
+            manifest = parse_planner_manifest(repaired_output)
+            planner_output = repaired_output
+        except Exception as repair_exc:
+            raise WorkflowError(
+                "Planner returned malformed manifest output and the automatic repair retry also failed. "
+                f"First error: {exc}. Repair error: {repair_exc}."
+            ) from repair_exc
     save_plan_manifest(paths.plan_md, manifest, planner_output)
 
     update_state_timestamp(paths.state_json, "last_planner_run_at")
@@ -972,6 +1056,16 @@ def parse_review_json(raw_output: str) -> StepResult:
     if not isinstance(approved, bool):
         raise WorkflowError("Reviewer JSON must include boolean field 'approved'.")
 
+    outcome_status = payload.get("outcome_status", "pass")
+    if not isinstance(outcome_status, str) or outcome_status not in {"pass", "fail", "inconclusive"}:
+        raise WorkflowError(
+            "Reviewer JSON field 'outcome_status' must be one of: pass, fail, inconclusive."
+        )
+
+    outcome_reason = payload.get("outcome_reason", "")
+    if not isinstance(outcome_reason, str):
+        raise WorkflowError("Reviewer JSON field 'outcome_reason' must be a string.")
+
     summary = payload.get("summary", "")
     if not isinstance(summary, str):
         raise WorkflowError("Reviewer JSON field 'summary' must be a string.")
@@ -995,6 +1089,8 @@ def parse_review_json(raw_output: str) -> StepResult:
         summary=summary or "No review summary provided.",
         required_changes=[str(item) for item in required_changes],
         raw_output=stripped,
+        outcome_status=outcome_status,
+        outcome_reason=outcome_reason.strip(),
         human_intervention_required=human_intervention_required,
         human_intervention_reason=human_intervention_reason.strip(),
     )
@@ -1041,10 +1137,19 @@ def run_review(paths: WorkflowPaths, config: dict[str, Any], step_id: str | None
     review_body = [
         f"Step: `{step['id']}`",
         f"Approved: `{str(review.approved).lower()}`",
+        f"Outcome status: `{review.outcome_status}`",
         "",
         "Summary:",
         review.summary,
     ]
+    if review.outcome_reason:
+        review_body.extend(
+            [
+                "",
+                "Outcome detail:",
+                review.outcome_reason,
+            ]
+        )
     if review.required_changes:
         review_body.extend(
             [
@@ -1068,7 +1173,13 @@ def run_review(paths: WorkflowPaths, config: dict[str, Any], step_id: str | None
     )
 
     if review.approved:
-        approve_step(paths.plan_md, step["id"], review.summary)
+        approve_step(
+            paths.plan_md,
+            step["id"],
+            review.summary,
+            outcome_status=review.outcome_status,
+            outcome_reason=review.outcome_reason,
+        )
     else:
         mark_step_status(
             paths.plan_md,

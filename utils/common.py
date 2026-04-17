@@ -116,6 +116,8 @@ class StepResult:
     summary: str
     required_changes: list[str]
     raw_output: str
+    outcome_status: str = "pass"
+    outcome_reason: str = ""
     human_intervention_required: bool = False
     human_intervention_reason: str = ""
 
