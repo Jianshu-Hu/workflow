@@ -737,6 +737,7 @@ def build_codex_prompt(
     step: dict[str, Any],
 ) -> str:
     verification_lines = "\n".join(f"- {item}" for item in step.get("verification", [])) or "- None listed"
+    acceptance_lines = "\n".join(f"- {item}" for item in step.get("acceptance_criteria", [])) or "- None listed"
     implementation_lines = "\n".join(f"- {item}" for item in step.get("implementation", [])) or "- No implementation notes provided"
     progress_text = clip_text(paths.progress_md.read_text(encoding="utf-8"), PROGRESS_PROMPT_CHARS, from_end=True)
     manifest_text = yaml.safe_dump(
@@ -754,6 +755,9 @@ Current step:
 
 Implementation requirements:
 {implementation_lines}
+
+Acceptance criteria:
+{acceptance_lines}
 
 Verification requirements:
 {verification_lines}
@@ -778,6 +782,7 @@ Required behavior:
 - Treat submodule-owned areas as read-only by default, and prefer creating helper scripts or artifacts under `{paths.root}` when you need workflow-specific glue.
 - Before concluding that the host GPU, renderer, or environment is broken, compare your own execution environment against the parent workflow snapshot above. If they differ, treat that as a workflow-launch or sandbox mismatch and fix the workflow/scripts/config so future runs use the same environment as the parent workflow shell.
 - Make the necessary repository changes.
+- Ensure the acceptance criteria for this step are satisfied, or clearly record why they are not satisfied.
 - Run the verification listed for this step.
 - If the first attempt fails but the failure appears fixable from this repository, repair the issue and rerun verification within the same step instead of stopping at the first error.
 - If verification fails because a public prerequisite is missing but the repository contains a documented or scriptable way to fetch or materialize it, implement that prerequisite staging in the workflow and rerun instead of treating it as immediate operator work.
@@ -817,6 +822,9 @@ Current step:
 Step verification criteria:
 {yaml.safe_dump(step.get("verification", []), sort_keys=False, allow_unicode=False).strip()}
 
+Step acceptance criteria:
+{yaml.safe_dump(step.get("acceptance_criteria", []), sort_keys=False, allow_unicode=False).strip()}
+
 Plan file:
 ```markdown
 {plan_text.strip()}
@@ -853,8 +861,9 @@ Return JSON only with this schema:
   "human_intervention_reason": "short reason or empty string"
 }}
 
-Approve only if the step is implemented and verified well enough to move on.
+Approve only if the step is implemented, verified, and evaluated against its acceptance criteria well enough to move on.
 Set `outcome_status` to `pass` when the step completed and achieved its intended outcome, `fail` when the step executed but the measured outcome is unacceptable, and `inconclusive` when the step completed but the result cannot yet be judged confidently.
+If any acceptance criterion is unmet, do not use `outcome_status=pass`; either reject the step or approve it with `outcome_status=fail` / `inconclusive` so follow-up work remains visible.
 Use `approved=true` with `outcome_status=fail` when the workflow should continue but the poor result must remain visible as a follow-on issue instead of blocking step completion.
 Set `human_intervention_required` to `true` only when the blocker clearly requires operator action outside the repository, such as missing permissions, credentials, unavailable external services, or unavailable hardware/resource allocation that the workflow cannot repair itself.
 Set `human_intervention_required` to `false` for workflow bugs, stale assumptions, launcher/sandbox mismatches, missing retries, weak diagnostics, bad scripts, or other issues that a replanned repository change could fix in a later loop iteration.
