@@ -329,6 +329,7 @@ def ensure_destination_workspace_is_fresh(paths: WorkflowPaths) -> None:
             paths.results_md,
             paths.migration_md,
             paths.progress_md,
+            paths.summary_md,
             paths.state_json,
             paths.root / "runtime.env",
         )

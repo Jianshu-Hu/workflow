@@ -12,6 +12,7 @@ This workflow runs a simple loop:
 
 - `plan.md`: operational plan. Completed steps are summarized; the current and upcoming steps stay detailed.
 - `progress.md`: compact resume note. It should contain only status, blockers, decisive evidence, and the next action.
+- `summary.md`: terminal handoff file. It records whether the workflow ended as `done`, `blocked`, `failed`, or `interrupted`.
 - `results.md`: append-only execution and review journal.
 - `artifacts/`: bulky command output and other raw evidence that should not live in workflow state files.
 
@@ -152,6 +153,7 @@ What `migrate` does:
 - `plan.md`: generated workflow plan plus compact manifest-backed overview
 - `results.md`: append-only execution and review log
 - `progress.md`: deterministic resume checkpoint
+- `summary.md`: terminal workflow summary covering final status, achieved work, implemented changes, remaining issues, and next steps
 - `artifact_index.json`: structured index of recent workflow artifacts such as results sections, discussion logs, and command failure outputs
 - `artifacts/`: raw logs and failure artifacts
 - `runtime.env`: per-workspace model overrides

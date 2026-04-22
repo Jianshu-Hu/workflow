@@ -16,6 +16,11 @@ import yaml
 from utils.common import (
     PROGRESS_TEMPLATE,
     RESULTS_HEADER,
+    SUMMARY_STATUS_BLOCKED,
+    SUMMARY_STATUS_DONE,
+    SUMMARY_STATUS_FAILED,
+    SUMMARY_STATUS_INTERRUPTED,
+    SUMMARY_TEMPLATE,
     StepResult,
     WorkflowError,
     WorkflowPaths,
@@ -50,6 +55,7 @@ from utils.manifest import (
     approve_step,
     build_fallback_progress,
     build_manifest_progress,
+    build_workflow_summary,
     clip_history_details,
     compact_manifest_for_prompt,
     create_default_manifest,
@@ -100,6 +106,8 @@ def ensure_workflow_files(
 
     if not paths.progress_md.exists():
         paths.progress_md.write_text(PROGRESS_TEMPLATE + "\n", encoding="utf-8")
+    if not paths.summary_md.exists():
+        paths.summary_md.write_text(SUMMARY_TEMPLATE + "\n", encoding="utf-8")
 
     if not paths.artifact_index_json.exists():
         save_artifact_index(
@@ -956,6 +964,26 @@ def write_progress_snapshot(paths: WorkflowPaths, progress_output: str) -> None:
     update_state_timestamp(paths.state_json, "last_progress_update_at")
 
 
+def write_workflow_summary(
+    paths: WorkflowPaths,
+    *,
+    summary_status: str,
+    terminal_error: str | None = None,
+    human_intervention_required: bool = False,
+    human_intervention_reason: str | None = None,
+) -> None:
+    paths.summary_md.write_text(
+        build_workflow_summary(
+            paths,
+            summary_status=summary_status,
+            terminal_error=terminal_error,
+            human_intervention_required=human_intervention_required,
+            human_intervention_reason=human_intervention_reason,
+        ),
+        encoding="utf-8",
+    )
+
+
 def planner_command_config(config: dict[str, Any]) -> str:
     planner = config.get("planner", {})
     template = (
@@ -1440,6 +1468,7 @@ def run_loop(
     while True:
         manifest, _ = load_plan_manifest(paths.plan_md)
         if manifest.get("status") == "done":
+            write_workflow_summary(paths, summary_status=SUMMARY_STATUS_DONE)
             return
 
         step = get_active_step(manifest)
@@ -1448,12 +1477,29 @@ def run_loop(
             if not review.approved:
                 if review.human_intervention_required:
                     reason = review.human_intervention_reason or review.summary
+                    write_workflow_summary(
+                        paths,
+                        summary_status=SUMMARY_STATUS_BLOCKED,
+                        terminal_error=(
+                            f"Review rejected step '{step['id']}' and requires human intervention: {reason}"
+                        ),
+                        human_intervention_required=True,
+                        human_intervention_reason=reason,
+                    )
                     raise WorkflowError(
                         f"Review rejected step '{step['id']}' and requires human intervention: {reason}"
                     )
 
                 prior_attempts = auto_replans_by_step.get(step["id"], 0)
                 if prior_attempts >= replan_limit:
+                    write_workflow_summary(
+                        paths,
+                        summary_status=SUMMARY_STATUS_FAILED,
+                        terminal_error=(
+                            f"Review rejected step '{step['id']}' after {prior_attempts} automatic replans. "
+                            "Auto-replan limit reached; inspect results.md and progress.md."
+                        ),
+                    )
                     raise WorkflowError(
                         f"Review rejected step '{step['id']}' after {prior_attempts} automatic replans. "
                         "Auto-replan limit reached; inspect results.md and progress.md."
@@ -1685,12 +1731,26 @@ def main(argv: list[str] | None = None) -> int:
             print(workflow_status(paths))
             return 0
     except WorkflowError as exc:
+        if args.command == "loop":
+            try:
+                write_workflow_summary(paths, summary_status=SUMMARY_STATUS_FAILED, terminal_error=str(exc))
+            except WorkflowError:
+                pass
         print(
             f"Workflow error: {summarize_workflow_error_for_console(str(exc))}",
             file=sys.stderr,
         )
         return 1
     except KeyboardInterrupt:
+        if args.command == "loop":
+            try:
+                write_workflow_summary(
+                    paths,
+                    summary_status=SUMMARY_STATUS_INTERRUPTED,
+                    terminal_error="Workflow interrupted by operator.",
+                )
+            except WorkflowError:
+                pass
         print("Workflow interrupted.", file=sys.stderr)
         return 130
 

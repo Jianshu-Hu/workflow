@@ -48,6 +48,12 @@ It should summarize the current state so a later workflow run can resume from he
 - Read this file together with `plan.md` and `results.md` before continuing.
 """
 
+SUMMARY_TEMPLATE = """# Workflow Summary
+
+Summary is generated automatically when the workflow finishes successfully or stops in a
+terminal blocked state that requires human intervention.
+"""
+
 
 @dataclasses.dataclass
 class WorkflowPaths:
@@ -80,6 +86,10 @@ class WorkflowPaths:
     @property
     def progress_md(self) -> Path:
         return self.root / "progress.md"
+
+    @property
+    def summary_md(self) -> Path:
+        return self.root / "summary.md"
 
     @property
     def state_json(self) -> Path:
@@ -124,6 +134,18 @@ class StepResult:
     outcome_reason: str = ""
     human_intervention_required: bool = False
     human_intervention_reason: str = ""
+
+
+SUMMARY_STATUS_DONE = "done"
+SUMMARY_STATUS_BLOCKED = "blocked"
+SUMMARY_STATUS_FAILED = "failed"
+SUMMARY_STATUS_INTERRUPTED = "interrupted"
+VALID_SUMMARY_STATUSES = {
+    SUMMARY_STATUS_DONE,
+    SUMMARY_STATUS_BLOCKED,
+    SUMMARY_STATUS_FAILED,
+    SUMMARY_STATUS_INTERRUPTED,
+}
 
 
 class WorkflowError(RuntimeError):
