@@ -24,13 +24,24 @@ if [[ ! -f "${prompt_file}" ]]; then
   exit 1
 fi
 
+claude_args=(
+  --print
+  --output-format text
+  --model "${claude_model}"
+  --permission-mode bypassPermissions
+  --tools ""
+)
+
+if [[ "${workflow_role}" == "reviewer" ]]; then
+  review_json_schema=$(cat <<'EOF'
+{"type":"object","properties":{"approved":{"type":"boolean"},"outcome_status":{"type":"string","enum":["pass","fail","inconclusive"]},"outcome_reason":{"type":"string"},"summary":{"type":"string"},"required_changes":{"type":"array","items":{"type":"string"}},"human_intervention_required":{"type":"boolean"},"human_intervention_reason":{"type":"string"}},"required":["approved","outcome_status","outcome_reason","summary","required_changes","human_intervention_required","human_intervention_reason"],"additionalProperties":false}
+EOF
+)
+  claude_args+=(--json-schema "${review_json_schema}")
+fi
+
 # Feed the prompt on stdin so large workflow prompts do not overflow argv.
-# Disable tools for noninteractive workflow stages so Claude emits plain text
-# output instead of attempting edits or permission-gated tool actions.
-exec claude \
-  --print \
-  --output-format text \
-  --model "${claude_model}" \
-  --permission-mode bypassPermissions \
-  --tools "" \
-  < "${prompt_file}"
+# Disable tools for noninteractive workflow stages so Claude emits text output
+# instead of attempting edits or permission-gated tool actions. Reviewer runs
+# additionally use a JSON schema so the response is machine-parseable.
+exec claude "${claude_args[@]}" < "${prompt_file}"

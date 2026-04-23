@@ -231,6 +231,11 @@ def append_results_section(results_path: Path, heading: str, body: str) -> None:
         handle.write(f"\n## {heading}\n\n{body.rstrip()}\n")
 
 
+def count_results_sections(results_text: str, heading: str) -> int:
+    pattern = re.compile(rf"^## {re.escape(heading)}\s*$", re.MULTILINE)
+    return len(pattern.findall(results_text))
+
+
 def append_results_section_with_index(
     paths: WorkflowPaths,
     heading: str,
@@ -1171,6 +1176,9 @@ def run_executor(paths: WorkflowPaths, config: dict[str, Any], step_id: str | No
     )
     manifest, _ = load_plan_manifest(paths.plan_md)
     step = get_step(manifest, step["id"])
+    step_results_heading = f"Step {step['id']} - {step['title']}"
+    results_before = paths.results_md.read_text(encoding="utf-8")
+    results_section_count_before = count_results_sections(results_before, step_results_heading)
 
     prompt_text = build_codex_prompt(paths, manifest, step)
     prompt_path = paths.prompts_dir / f"codex_{step['id']}.txt"
@@ -1202,6 +1210,32 @@ def run_executor(paths: WorkflowPaths, config: dict[str, Any], step_id: str | No
             step["id"],
             "needs_changes",
             event="executor_failed",
+            details=clip_history_details(failure_summary),
+        )
+        write_progress_snapshot(
+            paths,
+            build_manifest_progress(paths, latest_step=step),
+        )
+        raise WorkflowError(failure_summary)
+
+    results_after = paths.results_md.read_text(encoding="utf-8")
+    results_section_count_after = count_results_sections(results_after, step_results_heading)
+    if results_section_count_after <= results_section_count_before:
+        failure_summary = summarize_command_failure(
+            paths,
+            stage="executor_contract",
+            message=(
+                "Executor command completed but did not append the required step section to "
+                f"`{paths.results_md.name}` with heading `## {step_results_heading}`."
+            ),
+            result=result,
+            step_id=step["id"],
+        )
+        mark_step_status(
+            paths.plan_md,
+            step["id"],
+            "needs_changes",
+            event="executor_contract_failed",
             details=clip_history_details(failure_summary),
         )
         write_progress_snapshot(
@@ -1322,7 +1356,19 @@ def run_review(paths: WorkflowPaths, config: dict[str, Any], step_id: str | None
             )
         )
 
-    review = parse_review_json(result.stdout)
+    try:
+        review = parse_review_json(result.stdout)
+    except WorkflowError as exc:
+        raise WorkflowError(
+            summarize_command_failure(
+                paths,
+                stage="reviewer_parse_error",
+                message=f"Reviewer command succeeded but returned invalid JSON: {exc}",
+                result=result,
+                step_id=step["id"],
+            )
+        ) from exc
+
     review_body = [
         f"Step: `{step['id']}`",
         f"Approved: `{str(review.approved).lower()}`",
