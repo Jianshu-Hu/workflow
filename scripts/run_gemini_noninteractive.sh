@@ -24,5 +24,12 @@ if [[ ! -f "${prompt_file}" ]]; then
   exit 1
 fi
 
-# Feed the prompt on stdin so large workflow prompts do not overflow argv.
-exec gemini -m "${gemini_model}" < "${prompt_file}"
+# Gemini CLI defaults to interactive mode unless --prompt is provided.
+# Pass the prompt file contents through --prompt so workflow stages run
+# headlessly and terminate with a single response.
+prompt_text=$(<"${prompt_file}")
+exec gemini \
+  -m "${gemini_model}" \
+  --approval-mode plan \
+  --output-format text \
+  --prompt "${prompt_text}"
