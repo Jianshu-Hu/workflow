@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import json
 import re
+import shutil
 from pathlib import Path
 from typing import Any, Callable
 
 from utils.common import (
     RESULTS_HEADER,
+    SUMMARY_TEMPLATE,
     WorkflowError,
     WorkflowPaths,
     clip_text,
@@ -13,6 +16,7 @@ from utils.common import (
     read_optional_text,
     render_discussion_template,
     render_task_template,
+    save_artifact_index,
     save_state,
     utc_now,
 )
@@ -22,11 +26,54 @@ from utils.manifest import (
     get_active_step,
     latest_history_event,
     load_plan_manifest,
+    save_plan_manifest,
     summarize_step_review,
 )
 
 
 RESULTS_SUMMARY_CHARS = 400
+MIGRATION_COPY_DIRS = (
+    "scripts",
+    "vendor",
+    "data",
+    "cache",
+    "configs",
+    "checkpoints",
+    "eval_videos",
+    "tmp",
+    "logs",
+)
+MIGRATION_COPY_FILES = (
+    ".gitignore",
+)
+PATH_REWRITE_DIRS = (
+    "scripts",
+    "configs",
+)
+PATH_REWRITE_SUFFIXES = {
+    ".py",
+    ".sh",
+    ".bash",
+    ".zsh",
+    ".env",
+    ".json",
+    ".md",
+    ".txt",
+    ".yaml",
+    ".yml",
+}
+IN_PLACE_BACKUP_DIRNAME = "migration_snapshots"
+IN_PLACE_WORKFLOW_STATE_PATHS = (
+    "task.md",
+    "discussion.md",
+    "plan.md",
+    "results.md",
+    "migration.md",
+    "progress.md",
+    "summary.md",
+    "state.json",
+    "artifact_index.json",
+)
 
 
 def extract_markdown_section(markdown_text: str, heading: str) -> str:
@@ -316,6 +363,121 @@ def build_migrated_progress(
     ).rstrip() + "\n"
 
 
+def copy_migration_payload(*, source_paths: WorkflowPaths, dest_paths: WorkflowPaths) -> list[str]:
+    copied_items: list[str] = []
+
+    for dirname in MIGRATION_COPY_DIRS:
+        source_dir = source_paths.root / dirname
+        dest_dir = dest_paths.root / dirname
+        if not source_dir.exists():
+            continue
+        if source_dir.is_dir():
+            shutil.copytree(source_dir, dest_dir, dirs_exist_ok=True)
+            copied_items.append(dirname)
+
+    for filename in MIGRATION_COPY_FILES:
+        source_file = source_paths.root / filename
+        dest_file = dest_paths.root / filename
+        if not source_file.exists() or not source_file.is_file():
+            continue
+        dest_file.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_file, dest_file)
+        copied_items.append(filename)
+
+    return copied_items
+
+
+def rewrite_workspace_paths_in_copied_files(
+    *,
+    source_root: Path,
+    dest_root: Path,
+    workspace_root: Path,
+) -> list[str]:
+    rewritten_files: list[str] = []
+    source_text = str(source_root)
+    dest_text = str(dest_root)
+    source_rel = source_root.relative_to(source_root.parent)
+    dest_rel = dest_root.relative_to(dest_root.parent)
+    source_rel_text = str(source_rel)
+    dest_rel_text = str(dest_rel)
+
+    for dirname in PATH_REWRITE_DIRS:
+        target_root = workspace_root / dirname
+        if not target_root.exists():
+            continue
+        for path in target_root.rglob("*"):
+            if not path.is_file() or path.suffix.lower() not in PATH_REWRITE_SUFFIXES:
+                continue
+            original = path.read_text(encoding="utf-8")
+            updated = original.replace(source_text, dest_text)
+            updated = updated.replace(source_rel_text, dest_rel_text)
+            if updated == original:
+                continue
+            path.write_text(updated, encoding="utf-8")
+            rewritten_files.append(str(path.relative_to(workspace_root)))
+
+    return rewritten_files
+
+
+def build_migrated_manifest(source_manifest: dict[str, Any], *, imported_at: str) -> dict[str, Any]:
+    manifest = create_default_manifest(str(source_manifest.get("task", "")))
+    source_steps = source_manifest.get("steps", [])
+    if not isinstance(source_steps, list):
+        source_steps = []
+
+    active_source_step_id = None
+    try:
+        active_source_step = get_active_step(source_manifest)
+        active_source_step_id = str(active_source_step.get("id", "")).strip() or None
+    except WorkflowError:
+        active_source_step_id = None
+
+    migrated_steps: list[dict[str, Any]] = []
+    for raw_step in source_steps:
+        if not isinstance(raw_step, dict):
+            continue
+        step = dict(raw_step)
+        source_status = str(step.get("status", "pending"))
+        if source_status in {"approved", "done"}:
+            target_status = "approved"
+        elif active_source_step_id and step.get("id") == active_source_step_id:
+            target_status = "pending"
+        else:
+            target_status = "pending"
+        step["status"] = target_status
+        migrated_steps.append(step)
+
+    manifest["steps"] = migrated_steps
+    manifest["history"] = [
+        {
+            "step_id": active_source_step_id or "migration",
+            "event": "migrated",
+            "details": (
+                "Workspace migrated from prior workflow state. "
+                "Approved steps were preserved and unfinished work was carried forward for replanning/execution."
+            ),
+            "timestamp": imported_at,
+        }
+    ]
+
+    if active_source_step_id and any(step.get("id") == active_source_step_id for step in migrated_steps):
+        manifest["current_step"] = active_source_step_id
+        manifest["status"] = "pending"
+    elif migrated_steps:
+        next_pending = next(
+            (str(step.get("id")) for step in migrated_steps if step.get("status") == "pending"),
+            None,
+        )
+        manifest["current_step"] = next_pending
+        manifest["status"] = "pending" if next_pending else "done"
+    else:
+        manifest["current_step"] = None
+        manifest["status"] = "planning"
+
+    manifest["updated_at"] = imported_at
+    return manifest
+
+
 def ensure_destination_workspace_is_fresh(paths: WorkflowPaths) -> None:
     if not paths.root.exists():
         return
@@ -342,15 +504,34 @@ def ensure_destination_workspace_is_fresh(paths: WorkflowPaths) -> None:
         )
 
 
+def snapshot_in_place_workflow_state(paths: WorkflowPaths, *, imported_at: str) -> Path:
+    snapshot_root = paths.root / IN_PLACE_BACKUP_DIRNAME / imported_at.replace(":", "").replace("+", "_")
+    snapshot_root.mkdir(parents=True, exist_ok=True)
+
+    for relative_path in IN_PLACE_WORKFLOW_STATE_PATHS:
+        source = paths.root / relative_path
+        if not source.exists():
+            continue
+        dest = snapshot_root / relative_path
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, dest)
+
+    return snapshot_root
+
+
 def run_migration(
     dest_paths: WorkflowPaths,
     *,
     source_paths: WorkflowPaths,
     copy_runtime_env: bool,
     ensure_workflow_files_fn: Callable[..., None],
+    in_place: bool = False,
 ) -> None:
-    if dest_paths.root == source_paths.root:
-        raise WorkflowError("Source and destination workspaces must be different.")
+    same_workspace = dest_paths.root == source_paths.root
+    if same_workspace and not in_place:
+        raise WorkflowError("Source and destination workspaces must be different unless --in-place is used.")
+    if in_place and not same_workspace:
+        raise WorkflowError("--in-place requires --workspace and --from-workspace to point to the same workspace.")
     if not source_paths.root.exists():
         raise WorkflowError(f"Source workspace does not exist: {source_paths.root}")
     for required in (
@@ -361,7 +542,9 @@ def run_migration(
         if not required.exists():
             raise WorkflowError(f"Source workspace is missing required file: {required}")
 
-    ensure_destination_workspace_is_fresh(dest_paths)
+    snapshot_root: Path | None = None
+    if not in_place:
+        ensure_destination_workspace_is_fresh(dest_paths)
 
     source_manifest, source_manifest_error = load_source_manifest(source_paths)
     source_task_text = read_optional_text(source_paths.task_md)
@@ -369,7 +552,23 @@ def run_migration(
     task_summary = extract_task_summary(source_task_text, str(source_manifest.get("task", "")))
     imported_at = utc_now()
 
-    ensure_workflow_files_fn(dest_paths, task_summary=task_summary)
+    if in_place:
+        snapshot_root = snapshot_in_place_workflow_state(dest_paths, imported_at=imported_at)
+    else:
+        ensure_workflow_files_fn(dest_paths, task_summary=task_summary)
+
+    copied_items: list[str] = []
+    rewritten_files: list[str] = []
+    if not in_place:
+        copied_items = copy_migration_payload(source_paths=source_paths, dest_paths=dest_paths)
+        rewritten_files = rewrite_workspace_paths_in_copied_files(
+            source_root=source_paths.root,
+            dest_root=dest_paths.root,
+            workspace_root=dest_paths.root,
+        )
+
+    migrated_manifest = build_migrated_manifest(source_manifest, imported_at=imported_at)
+    save_plan_manifest(dest_paths.plan_md, migrated_manifest, "")
 
     dest_paths.task_md.write_text(
         append_import_note(
@@ -414,14 +613,50 @@ def run_migration(
             + f"- Imported from `{source_paths.root}` at `{imported_at}`.\n"
             + f"- Source workflow status: `{source_manifest.get('status', 'unknown')}`.\n"
             + f"- Source current step: `{source_manifest.get('current_step') or 'none'}`.\n"
+            + (
+                f"- Migration mode: `in_place`.\n"
+                if in_place
+                else f"- Migration mode: `copy_to_new_workspace`.\n"
+            )
+            + (
+                f"- Previous workflow-state files were snapshotted under `{snapshot_root}` before refresh.\n"
+                if snapshot_root is not None
+                else ""
+            )
+            + (
+                "- Copied run-local payload: "
+                + ", ".join(f"`{item}`" for item in copied_items)
+                + ".\n"
+                if copied_items
+                else "- No run-local payload directories were copied.\n"
+            )
+            + (
+                "- Rewrote copied text files that referenced the source workspace path: "
+                + ", ".join(f"`{item}`" for item in rewritten_files)
+                + ".\n"
+                if rewritten_files
+                else "- No copied script/config files required workspace path rewriting.\n"
+            )
             + "- This destination workspace starts cleanly in planning state; see `migration.md` for the handoff summary.\n"
         ),
         encoding="utf-8",
     )
 
+    dest_paths.summary_md.write_text(SUMMARY_TEMPLATE + "\n", encoding="utf-8")
+    save_artifact_index(
+        dest_paths.artifact_index_json,
+        {
+            "updated_at": imported_at,
+            "artifacts": [],
+        },
+    )
+
     state = load_state(dest_paths.state_json)
     state["migrated_from"] = str(source_paths.root)
     state["migrated_at"] = imported_at
+    state["migration_mode"] = "in_place" if in_place else "copy_to_new_workspace"
+    if snapshot_root is not None:
+        state["migration_snapshot"] = str(snapshot_root)
     save_state(dest_paths.state_json, state)
 
     if copy_runtime_env and (source_paths.root / "runtime.env").exists():

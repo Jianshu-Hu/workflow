@@ -116,6 +116,7 @@ python workflow/orchestrator.py --workspace workflow_runs/my-task --config workf
 
 Use `migrate` when an existing workflow run should hand off into a fresh workspace instead of resuming in place.
 This is useful after human intervention, repaired prerequisites, or when you want the planner to re-scope the unfinished work without carrying over terminal execution state.
+If you want to refresh workflow state inside the same workspace, use `migrate --in-place` with `--workspace` and `--from-workspace` pointing at that same workspace.
 
 Example:
 
@@ -125,6 +126,17 @@ python workflow/orchestrator.py \
   --config workflow/configs/config.gemini.example.yaml \
   migrate \
   --from-workspace workflow_runs/my-task
+```
+
+In-place example:
+
+```bash
+python workflow/orchestrator.py \
+  --workspace workflow_runs/my-task \
+  --config workflow/configs/config.gemini.example.yaml \
+  migrate \
+  --from-workspace workflow_runs/my-task \
+  --in-place
 ```
 
 If you want the migration and the kickoff discussion in one command, prefer:
@@ -140,6 +152,7 @@ python workflow/orchestrator.py \
 What `migrate` does:
 
 - Creates a new destination workspace and refuses to overwrite an existing workflow state.
+- With `--in-place`, refreshes workflow state inside the same workspace instead of creating a new one. Existing workflow-state files are snapshotted first, and run-local payload stays in place.
 - Copies the durable task and discussion context from the source workspace.
 - Writes `migration.md` in the destination with a summarized handoff: completed work, latest review, open issues, unfinished step, and the next action from the source workflow.
 - Resets the destination workspace to fresh `planning` status so the next `plan` or `loop` run can continue from the imported handoff instead of pretending work already ran there.

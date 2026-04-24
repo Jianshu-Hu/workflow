@@ -1143,9 +1143,33 @@ def run_planner(paths: WorkflowPaths, config: dict[str, Any]) -> None:
             manifest = parse_planner_manifest(repaired_output)
             planner_output = repaired_output
         except Exception as repair_exc:
+            planner_failure_summary = summarize_command_failure(
+                paths,
+                stage="planner_parse_error",
+                message=(
+                    "Planner returned malformed manifest output and the automatic repair retry also failed. "
+                    f"First error: {exc}. Repair error: {repair_exc}."
+                ),
+                result=subprocess.CompletedProcess(
+                    args=["planner_parse_error"],
+                    returncode=0,
+                    stdout=planner_output,
+                    stderr="",
+                ),
+            )
+            repair_failure_summary = summarize_command_failure(
+                paths,
+                stage="planner_repair_parse_error",
+                message="Automatic planner repair returned malformed manifest output.",
+                result=subprocess.CompletedProcess(
+                    args=["planner_repair_parse_error"],
+                    returncode=0,
+                    stdout=repaired_output,
+                    stderr="",
+                ),
+            )
             raise WorkflowError(
-                "Planner returned malformed manifest output and the automatic repair retry also failed. "
-                f"First error: {exc}. Repair error: {repair_exc}."
+                f"{planner_failure_summary}\n\n{repair_failure_summary}"
             ) from repair_exc
     save_plan_manifest(paths.plan_md, manifest, planner_output)
 
@@ -1644,6 +1668,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help="Do not copy runtime.env from the source workspace into the new workspace.",
     )
+    migrate_parser.add_argument(
+        "--in-place",
+        action="store_true",
+        help="Refresh workflow state inside the same workspace instead of creating a new one. Run-local payload stays in place and prior workflow-state files are snapshotted.",
+    )
 
     subparsers.add_parser("plan", help="Generate or refresh plan.md using the configured planner.")
 
@@ -1745,6 +1774,7 @@ def main(argv: list[str] | None = None) -> int:
                 source_paths=source_paths,
                 copy_runtime_env=not args.skip_runtime_env,
                 ensure_workflow_files_fn=ensure_workflow_files,
+                in_place=args.in_place,
             )
             print(f"Migrated workflow workspace to {paths.root}")
             print(f"Imported handoff summary written to {paths.migration_md}")
