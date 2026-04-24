@@ -12,7 +12,7 @@ This workflow runs a simple loop:
 
 - `plan.md`: operational plan. Completed steps are summarized; the current and upcoming steps stay detailed.
 - `progress.md`: compact resume note. It should contain only status, blockers, decisive evidence, and the next action.
-- `summary.md`: terminal handoff file. It records whether the workflow ended as `done`, `blocked`, `failed`, or `interrupted`.
+- `summary.md`: terminal handoff file. It records both the workflow execution status (`done`, `blocked`, `failed`, or `interrupted`) and the separate objective outcome (`pass`, `fail`, `inconclusive`, or `pending`).
 - `results.md`: append-only execution and review journal.
 - `artifacts/`: bulky command output and other raw evidence that should not live in workflow state files.
 
@@ -166,7 +166,7 @@ What `migrate` does:
 - `plan.md`: generated workflow plan plus compact manifest-backed overview
 - `results.md`: append-only execution and review log
 - `progress.md`: deterministic resume checkpoint
-- `summary.md`: terminal workflow summary covering final status, achieved work, implemented changes, remaining issues, and next steps
+- `summary.md`: terminal workflow summary covering final execution status, objective outcome, achieved work, implemented changes, remaining issues, and next steps
 - `artifact_index.json`: structured index of recent workflow artifacts such as results sections, discussion logs, and command failure outputs
 - `artifacts/`: raw logs and failure artifacts
 - `runtime.env`: per-workspace model overrides
@@ -222,3 +222,9 @@ This is useful for benchmarks and evaluations where the run completed, but the m
 
 When a step is approved with `outcome_status=fail`, the workflow automatically inserts a follow-up investigation step if one does not already exist.
 That keeps failed benchmark results visible as explicit workflow work instead of burying them only in `results.md`.
+
+Workflow completion and objective achievement are tracked separately:
+
+- Workflow execution status answers whether the workflow has any remaining actionable steps.
+- Objective outcome answers whether the user-facing goal was actually achieved.
+- A workflow can finish execution as `done` while still reporting objective outcome `fail` or `inconclusive` if approved steps documented unresolved benchmark or quality failures.

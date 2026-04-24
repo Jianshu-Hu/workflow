@@ -460,19 +460,11 @@ def build_migrated_manifest(source_manifest: dict[str, Any], *, imported_at: str
         }
     ]
 
-    if active_source_step_id and any(step.get("id") == active_source_step_id for step in migrated_steps):
-        manifest["current_step"] = active_source_step_id
-        manifest["status"] = "pending"
-    elif migrated_steps:
-        next_pending = next(
-            (str(step.get("id")) for step in migrated_steps if step.get("status") == "pending"),
-            None,
-        )
-        manifest["current_step"] = next_pending
-        manifest["status"] = "pending" if next_pending else "done"
-    else:
-        manifest["current_step"] = None
-        manifest["status"] = "planning"
+    # A migrated destination workspace must always restart in fresh planning state.
+    # Preserve imported steps as handoff context, but require an explicit planner run
+    # before execution so the new workspace does not inherit a terminal `done` state.
+    manifest["current_step"] = None
+    manifest["status"] = "planning"
 
     manifest["updated_at"] = imported_at
     return manifest

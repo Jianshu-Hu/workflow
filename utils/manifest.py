@@ -29,6 +29,7 @@ MANIFEST_HISTORY_DETAIL_CHARS = 2000
 MANIFEST_HISTORY_SAVE_ENTRIES = 40
 APPROVED_STEP_SUMMARY_CHARS = 500
 RESULTS_SUMMARY_CHARS = 400
+VALID_WORKFLOW_OUTCOME_STATUSES = {"pending", "pass", "fail", "inconclusive"}
 
 
 def _normalize_followup_step_id(source_step_id: str) -> str:
@@ -88,6 +89,76 @@ def summarize_step_outcome(step: dict[str, Any]) -> str | None:
     return f"Outcome `{outcome_status}`."
 
 
+def summarize_workflow_outcome(manifest: dict[str, Any]) -> tuple[str, str]:
+    approved_steps = [
+        step
+        for step in manifest.get("steps", [])
+        if isinstance(step, dict) and step.get("status") == "approved"
+    ]
+    unresolved_failures = [
+        step
+        for step in approved_steps
+        if str(step.get("outcome_status", "")).strip() == "fail"
+    ]
+    unresolved_inconclusive = [
+        step
+        for step in approved_steps
+        if str(step.get("outcome_status", "")).strip() == "inconclusive"
+    ]
+
+    if manifest.get("status") != "done":
+        return (
+            "pending",
+            "Workflow execution is still in progress, so the overall objective outcome is not final yet.",
+        )
+    if unresolved_failures:
+        labels = ", ".join(f"`{step['id']}`" for step in unresolved_failures[:3])
+        suffix = " and others" if len(unresolved_failures) > 3 else ""
+        return (
+            "fail",
+            f"Approved steps remain unresolved with outcome `fail`: {labels}{suffix}.",
+        )
+    if unresolved_inconclusive:
+        labels = ", ".join(f"`{step['id']}`" for step in unresolved_inconclusive[:3])
+        suffix = " and others" if len(unresolved_inconclusive) > 3 else ""
+        return (
+            "inconclusive",
+            f"Approved steps remain unresolved with outcome `inconclusive`: {labels}{suffix}.",
+        )
+    if approved_steps:
+        return (
+            "pass",
+            "Workflow execution is complete and no approved step records a failing or inconclusive outcome.",
+        )
+    return (
+        "inconclusive",
+        "Workflow execution is complete, but no approved steps were recorded to prove the objective was achieved.",
+    )
+
+
+def sync_workflow_outcome(manifest: dict[str, Any]) -> dict[str, Any]:
+    outcome, reason = summarize_workflow_outcome(manifest)
+    manifest["workflow_outcome"] = outcome
+    manifest["workflow_outcome_reason"] = reason
+    return manifest
+
+
+def unresolved_outcome_issue_lines(manifest: dict[str, Any]) -> list[str]:
+    issues: list[str] = []
+    for step in manifest.get("steps", []):
+        if step.get("status") != "approved":
+            continue
+        outcome_status = str(step.get("outcome_status", "")).strip()
+        if outcome_status not in {"fail", "inconclusive"}:
+            continue
+        reason = str(step.get("outcome_reason", "")).strip() or str(step.get("review_summary", "")).strip()
+        issues.append(
+            f"- `{step['id']}` remains unresolved with outcome `{outcome_status}`: "
+            f"{clip_text(reason or 'No reason recorded.', RESULTS_SUMMARY_CHARS, from_end=True)}"
+        )
+    return issues
+
+
 def render_step_summary(step: dict[str, Any]) -> list[str]:
     lines = [f"- {step_label(step)} [{step.get('status', 'pending')}]"]
     if step.get("status") == "approved":
@@ -129,6 +200,7 @@ def render_step_detail(step: dict[str, Any]) -> str:
 
 
 def render_plan_document(manifest: dict[str, Any]) -> str:
+    manifest = sync_workflow_outcome(copy.deepcopy(manifest))
     approved_steps = [step for step in manifest.get("steps", []) if step.get("status") in {"approved", "done"}]
     active_step = next(
         (
@@ -154,7 +226,8 @@ def render_plan_document(manifest: dict[str, Any]) -> str:
         "## Workflow Summary",
         "",
         f"- Task: {manifest.get('task') or '(not set)'}",
-        f"- Workflow status: `{manifest.get('status', 'unknown')}`",
+        f"- Workflow execution status: `{manifest.get('status', 'unknown')}`",
+        f"- Objective outcome: `{manifest.get('workflow_outcome', 'unknown')}`",
         f"- Current step: `{manifest.get('current_step') or 'none'}`",
         "",
         "## Completed Steps",
@@ -186,7 +259,7 @@ def render_plan_document(manifest: dict[str, Any]) -> str:
 
 
 def create_default_manifest(task_summary: str = "") -> dict[str, Any]:
-    return {
+    manifest = {
         "task": task_summary,
         "status": "planning",
         "current_step": None,
@@ -194,6 +267,7 @@ def create_default_manifest(task_summary: str = "") -> dict[str, Any]:
         "history": [],
         "updated_at": utc_now(),
     }
+    return sync_workflow_outcome(manifest)
 
 
 def extract_manifest_block(plan_text: str) -> tuple[str, int, int]:
@@ -219,7 +293,7 @@ def load_plan_manifest(plan_path: Path) -> tuple[dict[str, Any], str]:
     if not isinstance(manifest, dict):
         raise WorkflowError("Plan manifest must be a YAML mapping.")
     validate_manifest(manifest)
-    return manifest, plan_text
+    return sync_workflow_outcome(manifest), plan_text
 
 
 def validate_manifest(manifest: dict[str, Any]) -> None:
@@ -237,6 +311,16 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
         "needs_changes",
         "done",
     }
+    workflow_outcome = manifest.get("workflow_outcome")
+    if workflow_outcome is not None:
+        if not isinstance(workflow_outcome, str) or workflow_outcome not in VALID_WORKFLOW_OUTCOME_STATUSES:
+            raise WorkflowError(
+                f"Plan manifest has unsupported workflow_outcome {workflow_outcome!r}. "
+                f"Expected one of: {sorted(VALID_WORKFLOW_OUTCOME_STATUSES)}."
+            )
+    workflow_outcome_reason = manifest.get("workflow_outcome_reason")
+    if workflow_outcome_reason is not None and not isinstance(workflow_outcome_reason, str):
+        raise WorkflowError("Plan manifest workflow_outcome_reason must be a string when present.")
 
     for index, step in enumerate(steps, start=1):
         if not isinstance(step, dict):
@@ -292,7 +376,7 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
 
 
 def compact_manifest_for_storage(manifest: dict[str, Any]) -> dict[str, Any]:
-    compact = copy.deepcopy(manifest)
+    compact = sync_workflow_outcome(copy.deepcopy(manifest))
 
     history = compact.get("history")
     if isinstance(history, list):
@@ -323,6 +407,12 @@ def compact_manifest_for_storage(manifest: dict[str, Any]) -> dict[str, Any]:
             objective = str(step.get("objective", "")).strip()
             if objective:
                 step["objective"] = clip_text(objective, RESULTS_SUMMARY_CHARS)
+    if isinstance(compact.get("workflow_outcome_reason"), str):
+        compact["workflow_outcome_reason"] = clip_text(
+            compact["workflow_outcome_reason"],
+            RESULTS_SUMMARY_CHARS,
+            from_end=True,
+        )
     return compact
 
 
@@ -587,7 +677,11 @@ def build_manifest_progress(
         current_status_lines.append(
             f"- The next actionable step is `{active_step['id']}` ({active_step['title']})."
         )
-    current_status_lines.append(f"- **Workflow Status:** `{manifest.get('status', 'unknown')}`")
+    current_status_lines.append(f"- **Workflow Execution Status:** `{manifest.get('status', 'unknown')}`")
+    current_status_lines.append(f"- **Objective Outcome:** `{manifest.get('workflow_outcome', 'unknown')}`")
+    workflow_outcome_reason = str(manifest.get("workflow_outcome_reason", "")).strip()
+    if workflow_outcome_reason:
+        current_status_lines.append(f"- **Objective Outcome Detail:** {workflow_outcome_reason}")
 
     if review is not None and latest_step is not None:
         latest_review_lines = [
@@ -630,6 +724,9 @@ def build_manifest_progress(
             details = latest_failure.get("details") if latest_failure else None
             if details:
                 open_issues.append(f"- {clip_history_details(details)}")
+    open_issues.extend(
+        issue for issue in unresolved_outcome_issue_lines(manifest) if issue not in open_issues
+    )
     if not open_issues:
         open_issues.append("- None recorded.")
 
@@ -702,6 +799,8 @@ def build_workflow_summary(
     manifest, _ = load_plan_manifest(paths.plan_md)
     active_step_id = manifest.get("current_step")
     active_step = get_step(manifest, active_step_id) if active_step_id else None
+    workflow_outcome = str(manifest.get("workflow_outcome", "unknown"))
+    workflow_outcome_reason = str(manifest.get("workflow_outcome_reason", "")).strip()
 
     achieved: list[str] = []
     implemented: list[str] = []
@@ -747,18 +846,11 @@ def build_workflow_summary(
                 f"{clip_text(details, MANIFEST_HISTORY_DETAIL_CHARS, from_end=True)}"
             )
 
+    remaining_issues.extend(unresolved_outcome_issue_lines(manifest))
+
     for step in manifest.get("steps", []):
         status = step.get("status")
         if status == "approved":
-            if step.get("outcome_status") in {"fail", "inconclusive"}:
-                reason = str(step.get("outcome_reason", "")).strip() or str(
-                    step.get("review_summary", "")
-                ).strip()
-                remaining_issues.append(
-                    f"- `{step['id']}` remains unresolved with outcome "
-                    f"`{step.get('outcome_status')}`: "
-                    f"{clip_text(reason, RESULTS_SUMMARY_CHARS, from_end=True)}"
-                )
             continue
         if status in {"pending", "needs_changes", "in_progress", "awaiting_review"}:
             remaining_issues.append(
@@ -810,6 +902,12 @@ def build_workflow_summary(
             "",
             f"- Workflow status: `{summary_status}`",
             f"- Manifest status: `{manifest.get('status', 'unknown')}`",
+            f"- Objective outcome: `{workflow_outcome}`",
+            (
+                f"- Objective outcome detail: {workflow_outcome_reason}"
+                if workflow_outcome_reason
+                else "- Objective outcome detail: not recorded."
+            ),
             f"- Current step: `{manifest.get('current_step') or 'none'}`",
             "",
             "## Achieved",

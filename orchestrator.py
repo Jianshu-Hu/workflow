@@ -1519,7 +1519,7 @@ def run_loop(
     max_auto_replans_per_step: int | None = None,
 ) -> None:
     manifest, _ = load_plan_manifest(paths.plan_md)
-    if not manifest["steps"]:
+    if manifest.get("status") == "planning" or not manifest["steps"]:
         run_planner(paths, config)
 
     approved_steps = 0
