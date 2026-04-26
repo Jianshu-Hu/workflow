@@ -72,6 +72,10 @@ class WorkflowPaths:
         return self.root / "discussion.md"
 
     @property
+    def lesson_candidates_yaml(self) -> Path:
+        return self.root / "lesson_candidates.yaml"
+
+    @property
     def plan_md(self) -> Path:
         return self.root / "plan.md"
 
@@ -123,6 +127,10 @@ class WorkflowPaths:
     def discussion_output_log(self) -> Path:
         return self.artifacts_dir / "discussion_output.log"
 
+    @property
+    def global_lessons_yaml(self) -> Path:
+        return self.repo_root / "workflow" / "memory" / "lessons.yaml"
+
 
 @dataclasses.dataclass
 class StepResult:
@@ -136,6 +144,7 @@ class StepResult:
     human_intervention_reason: str = ""
     acceptance_results: list[dict[str, str]] = dataclasses.field(default_factory=list)
     verification_results: list[dict[str, str]] = dataclasses.field(default_factory=list)
+    lesson_candidates: list[dict[str, Any]] = dataclasses.field(default_factory=list)
 
 
 SUMMARY_STATUS_DONE = "done"

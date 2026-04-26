@@ -95,6 +95,12 @@ INCOMPLETE_EVIDENCE_PATTERNS = (
     r"\bto\s+be\s+verified\b",
     r"\bneeds?\s+verification\b",
 )
+LESSON_CONTEXT_CHARS = 24000
+MAX_RELEVANT_LESSONS = 5
+LESSON_REJECTED_MIN = -5
+LESSON_REJECTED_MAX = -1
+LESSON_ACTIVE_MIN = 1
+LESSON_ACTIVE_MAX = 10
 
 
 def ensure_workflow_files(
@@ -332,6 +338,152 @@ def artifact_index_summary(paths: WorkflowPaths, *, max_entries: int = 12) -> st
         lines.append(prefix)
 
     return "\n".join(lines) if lines else "No indexed artifacts yet."
+
+
+def load_workflow_lessons(paths: WorkflowPaths) -> list[dict[str, Any]]:
+    if not paths.global_lessons_yaml.exists():
+        return []
+    data = yaml.safe_load(paths.global_lessons_yaml.read_text(encoding="utf-8")) or {}
+    if not isinstance(data, dict):
+        raise WorkflowError(f"Global lessons file must contain a YAML mapping: {paths.global_lessons_yaml}")
+    lessons = data.get("lessons", [])
+    if lessons is None:
+        return []
+    if not isinstance(lessons, list):
+        raise WorkflowError(f"Global lessons file 'lessons' field must be a list: {paths.global_lessons_yaml}")
+    valid_lessons: list[dict[str, Any]] = []
+    for index, lesson in enumerate(lessons, start=1):
+        if not isinstance(lesson, dict):
+            raise WorkflowError(f"Global lesson {index} must be a mapping.")
+        confidence = lesson.get("confidence", 0)
+        if not isinstance(confidence, int) or confidence < LESSON_REJECTED_MIN or confidence > LESSON_ACTIVE_MAX:
+            raise WorkflowError(
+                f"Global lesson {lesson.get('id', index)!r} confidence must be an integer from -5 to 10."
+            )
+        valid_lessons.append(lesson)
+    return valid_lessons
+
+
+def lesson_text_values(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        values: list[str] = []
+        for item in value:
+            values.extend(lesson_text_values(item))
+        return values
+    if isinstance(value, dict):
+        values = []
+        for item in value.values():
+            values.extend(lesson_text_values(item))
+        return values
+    return []
+
+
+def lesson_trigger_terms(lesson: dict[str, Any]) -> list[str]:
+    terms: list[str] = []
+    for key in ("trigger_terms", "domains", "applies_when"):
+        terms.extend(lesson_text_values(lesson.get(key, [])))
+    return [term.strip().lower() for term in terms if term.strip()]
+
+
+def lesson_relevance_score(lesson: dict[str, Any], context_text: str) -> int:
+    confidence = lesson.get("confidence", 0)
+    if not isinstance(confidence, int) or confidence <= 0:
+        return 0
+    lowered_context = context_text.lower()
+    terms = lesson_trigger_terms(lesson)
+    score = sum(2 for term in terms if term and term in lowered_context)
+    lesson_id = str(lesson.get("id", "")).strip().lower()
+    title = str(lesson.get("title", "")).strip().lower()
+    if lesson_id and lesson_id in lowered_context:
+        score += 3
+    if title and title in lowered_context:
+        score += 2
+    return score
+
+
+def lesson_context_for_planner(paths: WorkflowPaths) -> str:
+    parts = [
+        paths.task_md.read_text(encoding="utf-8") if paths.task_md.exists() else "",
+        paths.discussion_md.read_text(encoding="utf-8") if paths.discussion_md.exists() else "",
+        paths.migration_md.read_text(encoding="utf-8") if paths.migration_md.exists() else "",
+        paths.progress_md.read_text(encoding="utf-8") if paths.progress_md.exists() else "",
+    ]
+    return clip_text("\n\n".join(parts), LESSON_CONTEXT_CHARS, from_end=True)
+
+
+def lesson_context_for_step(paths: WorkflowPaths, step: dict[str, Any]) -> str:
+    step_text = yaml.safe_dump(step, sort_keys=False, allow_unicode=False)
+    parts = [
+        paths.task_md.read_text(encoding="utf-8") if paths.task_md.exists() else "",
+        paths.discussion_md.read_text(encoding="utf-8") if paths.discussion_md.exists() else "",
+        paths.progress_md.read_text(encoding="utf-8") if paths.progress_md.exists() else "",
+        step_text,
+    ]
+    return clip_text("\n\n".join(parts), LESSON_CONTEXT_CHARS, from_end=True)
+
+
+def select_relevant_lessons(paths: WorkflowPaths, context_text: str) -> list[dict[str, Any]]:
+    scored: list[tuple[int, int, dict[str, Any]]] = []
+    for lesson in load_workflow_lessons(paths):
+        score = lesson_relevance_score(lesson, context_text)
+        confidence = lesson.get("confidence", 0)
+        if score > 0 and isinstance(confidence, int) and confidence > 0:
+            scored.append((score, confidence, lesson))
+    scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return [lesson for _, _, lesson in scored[:MAX_RELEVANT_LESSONS]]
+
+
+def render_lesson_list(items: Any) -> list[str]:
+    values = lesson_text_values(items)
+    return [f"  - {value}" for value in values if value.strip()]
+
+
+def render_relevant_lessons(lessons: list[dict[str, Any]]) -> str:
+    if not lessons:
+        return "No relevant active workflow-level lessons were selected."
+
+    lines = [
+        "Relevant active workflow-level lessons:",
+        "",
+        "Confidence scale: 0=candidate/init, 1..10=active confidence, -1..-5=rejected. "
+        "Use these lessons only within their stated scope.",
+    ]
+    for lesson in lessons:
+        lesson_id = str(lesson.get("id", "unnamed-lesson"))
+        title = str(lesson.get("title", "")).strip()
+        confidence = lesson.get("confidence", 0)
+        mode = str(lesson.get("mode", "advisory")).strip() or "advisory"
+        lines.extend(
+            [
+                "",
+                f"- id: {lesson_id}",
+                f"  title: {title or lesson_id}",
+                f"  confidence: {confidence}",
+                f"  mode: {mode}",
+            ]
+        )
+        claim = str(lesson.get("claim", "") or lesson.get("lesson", "")).strip()
+        if claim:
+            lines.append(f"  claim: {claim}")
+        applies = render_lesson_list(lesson.get("applies_when", []))
+        if applies:
+            lines.append("  applies_when:")
+            lines.extend(applies)
+        required_checks = render_lesson_list(lesson.get("required_checks", []))
+        if required_checks:
+            lines.append("  required_checks:")
+            lines.extend(required_checks)
+        anti_patterns = render_lesson_list(lesson.get("anti_patterns", []))
+        if anti_patterns:
+            lines.append("  anti_patterns:")
+            lines.extend(anti_patterns)
+        falsification = render_lesson_list(lesson.get("falsification_conditions", []))
+        if falsification:
+            lines.append("  falsification_conditions:")
+            lines.extend(falsification)
+    return "\n".join(lines)
 
 
 def markdown_heading_present(section_text: str, heading: str) -> bool:
@@ -729,6 +881,7 @@ def build_planner_prompt(paths: WorkflowPaths, config: dict[str, Any]) -> str:
     progress_text = clip_text(paths.progress_md.read_text(encoding="utf-8"), PROGRESS_PROMPT_CHARS, from_end=True)
     model_hint = planner_model_name(config)
     parent_runtime = runtime_context(paths)
+    lessons_text = render_relevant_lessons(select_relevant_lessons(paths, lesson_context_for_planner(paths)))
     migration_requirements = ""
     migration_block = ""
     if migration_text.strip():
@@ -782,11 +935,18 @@ Requirements:
 - For large or slow prerequisite downloads, prefer idempotent, resumable staging steps that materialize stable shared paths or caches before the expensive evaluation step runs.
 - Avoid modifying tracked files inside submodules unless there is no viable workflow-local or repository-local alternative.
 - Only leave the workflow blocked on human intervention if the latest evidence shows a permission, credential, quota, unavailable external resource with no workflow-controlled acquisition path, or operator-owned environment change that cannot be solved from this repository.
+- Apply relevant active workflow-level lessons when their scope matches this task. If a selected lesson is only advisory, use it as a planning caution. If it is a planning gate, include concrete steps or acceptance criteria that satisfy its required checks before expensive or irreversible work.
+- Do not invent new global lessons in the plan. New lessons must be proposed through review and human approval.
 {migration_requirements}
 
 Parent workflow runtime snapshot:
 ```text
 {parent_runtime}
+```
+
+Workflow-level lessons:
+```text
+{lessons_text}
 ```
 
 Path placeholders:
@@ -1020,6 +1180,7 @@ def build_codex_prompt(
         allow_unicode=False,
     ).strip()
     parent_runtime = runtime_context(paths)
+    lessons_text = render_relevant_lessons(select_relevant_lessons(paths, lesson_context_for_step(paths, step)))
     return f"""Implement exactly one approved workflow step in this repository.
 
 Current step:
@@ -1049,6 +1210,11 @@ Parent workflow runtime snapshot:
 {parent_runtime}
 ```
 
+Workflow-level lessons:
+```text
+{lessons_text}
+```
+
 Required behavior:
 - Work only on step `{step['id']}`.
 - Read `{paths.progress_md}` first and use it to avoid redoing already completed work.
@@ -1065,6 +1231,7 @@ Required behavior:
 - If verification fails because a public prerequisite is missing but the repository contains a documented or scriptable way to fetch or materialize it, implement that prerequisite staging in the workflow and rerun instead of treating it as immediate operator work.
 - Prefer committed, idempotent setup helpers over one-off shell history. If a prerequisite is large, make the setup resumable and cache-aware so later workflow runs do not repeat the download or extraction.
 - Reserve requests for human intervention for cases that truly require operator action outside the repository, such as missing permissions, credentials, cluster allocation, or external services you cannot control.
+- Apply selected workflow-level lessons only when their stated scope matches the current step. If a lesson requires checks relevant to this step, perform them or record concrete evidence explaining why they do not apply.
 - Append a new section to `{paths.results_md}` titled `Step {step['id']} - {step['title']}`.
 - In that section include these exact third-level subsections:
   - `### Acceptance Evidence`: map every acceptance criterion to `pass`, `fail`, or `inconclusive` with concrete evidence.
@@ -1094,6 +1261,7 @@ def build_review_prompt(paths: WorkflowPaths, step: dict[str, Any]) -> str:
     results_text = clip_text(paths.results_md.read_text(encoding="utf-8"), RESULTS_PROMPT_CHARS, from_end=True)
     progress_text = clip_text(paths.progress_md.read_text(encoding="utf-8"), PROGRESS_PROMPT_CHARS, from_end=True)
     parent_runtime = runtime_context(paths)
+    lessons_text = render_relevant_lessons(select_relevant_lessons(paths, lesson_context_for_step(paths, step)))
     return f"""You are the review gate for a coding workflow.
 
 Review whether Codex completed the current step well enough to continue.
@@ -1133,6 +1301,11 @@ Parent workflow runtime snapshot:
 {parent_runtime}
 ```
 
+Workflow-level lessons:
+```text
+{lessons_text}
+```
+
 Return JSON only with this schema:
 {{
   "approved": true or false,
@@ -1145,12 +1318,29 @@ Return JSON only with this schema:
   "verification_results": [
     {{"check": "verification text", "status": "pass|fail|inconclusive", "evidence": "command/check, exit code when applicable, and artifact reference"}}
   ],
+  "lesson_candidates": [
+    {{
+      "id": "stable-kebab-case-id",
+      "title": "short title",
+      "confidence": 0,
+      "claim": "carefully scoped lesson candidate",
+      "applies_when": ["scope condition"],
+      "does_not_apply_when": ["out-of-scope condition"],
+      "required_checks": ["future workflow check"],
+      "evidence": ["artifact-backed claim"],
+      "falsification_conditions": ["what would weaken or disprove it"],
+      "review_required": ["codex", "claude", "gemini", "human"]
+    }}
+  ],
   "required_changes": ["change 1", "change 2"],
   "human_intervention_required": true or false,
   "human_intervention_reason": "short reason or empty string"
 }}
 
 Approve only if the step is implemented, verified, and evaluated against its acceptance criteria well enough to move on.
+Use selected workflow-level lessons as review context only within their stated scope.
+If the run exposes a reusable workflow-level lesson, return it in `lesson_candidates` with `confidence=0`; do not mark it active or globally approved.
+Propose a lesson candidate only when it is supported by concrete artifacts and includes scope, required checks, and falsification conditions. Do not propose lessons from weak hypotheses or one-off local details.
 Reject if the latest step result section is missing any of these subsections: `### Acceptance Evidence`, `### Verification Evidence`, `### Changed Files`, or `### Outcome`.
 Reject if any acceptance criterion or verification requirement lacks specific evidence in the latest step result section.
 Reject if command-based verification lacks an exit/return code, unless the result section explains why no command was applicable for that requirement.
@@ -1693,6 +1883,7 @@ def parse_review_json(raw_output: str) -> StepResult:
 
     acceptance_results = parse_review_result_list(payload.get("acceptance_results", []), "acceptance_results")
     verification_results = parse_review_result_list(payload.get("verification_results", []), "verification_results")
+    lesson_candidates = parse_lesson_candidates(payload.get("lesson_candidates", []))
 
     return StepResult(
         approved=approved,
@@ -1705,7 +1896,37 @@ def parse_review_json(raw_output: str) -> StepResult:
         human_intervention_reason=human_intervention_reason.strip(),
         acceptance_results=acceptance_results,
         verification_results=verification_results,
+        lesson_candidates=lesson_candidates,
     )
+
+
+def normalize_lesson_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(candidate)
+    lesson_id = str(normalized.get("id", "")).strip()
+    if not lesson_id:
+        title = str(normalized.get("title", "") or normalized.get("claim", "")).strip().lower()
+        lesson_id = re.sub(r"[^a-z0-9]+", "-", title).strip("-")[:80]
+    normalized["id"] = lesson_id or "lesson-candidate"
+    normalized["confidence"] = 0
+    normalized.setdefault("review_required", ["codex", "claude", "gemini", "human"])
+    normalized.setdefault("reviews", {"codex": "pending", "claude": "pending", "gemini": "pending", "human": "pending"})
+    normalized.setdefault("status", "candidate")
+    normalized.setdefault("created_at", utc_now())
+    return normalized
+
+
+def parse_lesson_candidates(value: Any) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise WorkflowError("Reviewer JSON field 'lesson_candidates' must be a list when present.")
+
+    candidates: list[dict[str, Any]] = []
+    for index, item in enumerate(value, start=1):
+        if not isinstance(item, dict):
+            raise WorkflowError(f"Reviewer JSON field 'lesson_candidates' item {index} must be an object.")
+        candidates.append(normalize_lesson_candidate(item))
+    return candidates
 
 
 def parse_review_result_list(value: Any, field_name: str) -> list[dict[str, str]]:
@@ -1737,6 +1958,49 @@ def format_review_result_matrix(items: list[dict[str, str]]) -> list[str]:
         evidence = item.get("evidence", "").strip()
         suffix = f" - {evidence}" if evidence else ""
         lines.append(f"- `{status}` {label}{suffix}")
+    return lines
+
+
+def load_lesson_candidate_file(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {"lesson_candidates": []}
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(data, dict):
+        raise WorkflowError(f"Lesson candidate file must contain a YAML mapping: {path}")
+    candidates = data.get("lesson_candidates", [])
+    if candidates is None:
+        data["lesson_candidates"] = []
+    elif not isinstance(candidates, list):
+        raise WorkflowError(f"Lesson candidate file 'lesson_candidates' field must be a list: {path}")
+    return data
+
+
+def save_lesson_candidates(paths: WorkflowPaths, candidates: list[dict[str, Any]], step: dict[str, Any]) -> None:
+    if not candidates:
+        return
+    data = load_lesson_candidate_file(paths.lesson_candidates_yaml)
+    existing = data.setdefault("lesson_candidates", [])
+    for candidate in candidates:
+        item = normalize_lesson_candidate(candidate)
+        item.setdefault("source", {})
+        if isinstance(item["source"], dict):
+            item["source"].setdefault("workspace", str(paths.root))
+            item["source"].setdefault("step_id", step["id"])
+            item["source"].setdefault("results", str(paths.results_md))
+        existing.append(item)
+    data["updated_at"] = utc_now()
+    paths.lesson_candidates_yaml.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=False), encoding="utf-8")
+
+
+def format_lesson_candidate_summary(candidates: list[dict[str, Any]]) -> list[str]:
+    if not candidates:
+        return []
+    lines = ["", "Lesson candidates:"]
+    for candidate in candidates:
+        lesson_id = str(candidate.get("id", "lesson-candidate"))
+        confidence = candidate.get("confidence", 0)
+        title = str(candidate.get("title", "") or candidate.get("claim", "")).strip()
+        lines.append(f"- `{lesson_id}` confidence={confidence}: {title}")
     return lines
 
 
@@ -1822,6 +2086,8 @@ def run_review(paths: WorkflowPaths, config: dict[str, Any], step_id: str | None
                 *format_review_result_matrix(review.verification_results),
             ]
         )
+    if review.lesson_candidates:
+        review_body.extend(format_lesson_candidate_summary(review.lesson_candidates))
     if review.required_changes:
         review_body.extend(
             [
@@ -1844,6 +2110,7 @@ def run_review(paths: WorkflowPaths, config: dict[str, Any], step_id: str | None
         "\n".join(review_body),
         step_id=step["id"],
     )
+    save_lesson_candidates(paths, review.lesson_candidates, step)
 
     if review.approved:
         approve_step(

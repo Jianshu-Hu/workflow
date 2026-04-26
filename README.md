@@ -184,6 +184,33 @@ The section must be headed `## Step <id> - <title>` and must include these exact
 If the evidence is missing, vague, still running, skipped, not tested, or lacks command exit codes for command-based checks, the step remains `needs_changes`.
 The workflow writes an evidence contract report under `artifacts/command_failures/` so the same step can be resumed with the missing proof.
 
+## Workflow-Level Lessons
+
+Curated cross-run lessons live in `workflow/memory/lessons.yaml`.
+These are global workflow memories, not project handoff state; normal project context should still move through `migrate`.
+Use `workflow/memory/lesson_evaluation.md` to review candidates with Codex, Gemini, Claude, and human before activation.
+
+Lesson confidence is numeric:
+
+- `0`: candidate/init. Stored for review, but not injected into planner, executor, or reviewer prompts.
+- `1` to `10`: active confidence. Relevant lessons are selected by trigger terms/scope and injected into prompts.
+- `-1` to `-5`: rejected. Kept as an audit record, never injected.
+
+The reviewer can propose new workflow-level lessons in its JSON output.
+Those proposals are written to the workspace-local `lesson_candidates.yaml` with `confidence: 0`.
+They are not added to global active memory automatically.
+
+Human processing flow:
+
+- Inspect `lesson_candidates.yaml` and the cited artifacts.
+- Run `workflow/scripts/evaluate_lesson.sh <workflow-run-folder>` to ask Codex, Gemini, and Claude to independently review whether the lesson is evidence-backed, scoped correctly, actionable, and falsifiable.
+- If any reviewer objects, either revise the candidate or mark it rejected with negative confidence.
+- If all reviewers and the human approve, copy the lesson into `workflow/memory/lessons.yaml` at `confidence: 0` or promote it to `1` if the human wants it active as a low-confidence advisory.
+- Increase confidence only after a future run shows the lesson was useful, then repeat Codex, Claude, Gemini, and human review before promotion.
+
+The evaluator writes raw prompts, raw model outputs, parsed review summaries, and `human_review.md` under `<workflow-run-folder>/lesson_reviews/`.
+Use `--lesson-id <id>` to review one candidate and `--dry-run` to verify report generation without calling model CLIs.
+
 ## Wrappers
 
 - `workflow/scripts/run_gemini_noninteractive.sh`

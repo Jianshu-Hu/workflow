@@ -42,7 +42,7 @@ if [[ "${workflow_role}" == "reviewer" ]]; then
   review_instruction=$(cat <<'EOF'
 Return exactly one JSON object and nothing else.
 The JSON object must follow this schema:
-{"type":"object","properties":{"approved":{"type":"boolean"},"outcome_status":{"type":"string","enum":["pass","fail","inconclusive"]},"outcome_reason":{"type":"string"},"summary":{"type":"string"},"required_changes":{"type":"array","items":{"type":"string"}},"human_intervention_required":{"type":"boolean"},"human_intervention_reason":{"type":"string"}},"required":["approved","outcome_status","outcome_reason","summary","required_changes","human_intervention_required","human_intervention_reason"],"additionalProperties":false}
+{"type":"object","properties":{"approved":{"type":"boolean"},"outcome_status":{"type":"string","enum":["pass","fail","inconclusive"]},"outcome_reason":{"type":"string"},"summary":{"type":"string"},"acceptance_results":{"type":"array","items":{"type":"object"}},"verification_results":{"type":"array","items":{"type":"object"}},"lesson_candidates":{"type":"array","items":{"type":"object"}},"required_changes":{"type":"array","items":{"type":"string"}},"human_intervention_required":{"type":"boolean"},"human_intervention_reason":{"type":"string"}},"required":["approved","outcome_status","outcome_reason","summary","required_changes","human_intervention_required","human_intervention_reason"],"additionalProperties":false}
 EOF
 )
   prompt_dir=$(dirname "${prompt_file}")
