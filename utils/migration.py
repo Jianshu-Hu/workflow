@@ -470,6 +470,19 @@ def build_migrated_manifest(source_manifest: dict[str, Any], *, imported_at: str
     return manifest
 
 
+def rewrite_legacy_workspace_alias_in_value(value: Any, *, workspace_root: Path) -> Any:
+    if isinstance(value, str):
+        return value.replace("workflow_workspace", str(workspace_root))
+    if isinstance(value, list):
+        return [rewrite_legacy_workspace_alias_in_value(item, workspace_root=workspace_root) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: rewrite_legacy_workspace_alias_in_value(item, workspace_root=workspace_root)
+            for key, item in value.items()
+        }
+    return value
+
+
 def ensure_destination_workspace_is_fresh(paths: WorkflowPaths) -> None:
     if not paths.root.exists():
         return
@@ -560,6 +573,10 @@ def run_migration(
         )
 
     migrated_manifest = build_migrated_manifest(source_manifest, imported_at=imported_at)
+    migrated_manifest = rewrite_legacy_workspace_alias_in_value(
+        migrated_manifest,
+        workspace_root=dest_paths.root,
+    )
     save_plan_manifest(dest_paths.plan_md, migrated_manifest, "")
 
     dest_paths.task_md.write_text(

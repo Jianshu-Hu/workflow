@@ -728,7 +728,14 @@ def run_planner_command(
 
     planner_output = result.stdout.strip()
     if not planner_output:
-        raise WorkflowError("Planner command returned empty output.")
+        raise WorkflowError(
+            summarize_command_failure(
+                paths,
+                stage="planner_empty_output",
+                message="Planner command returned empty output.",
+                result=result,
+            )
+        )
     return planner_output
 
 
