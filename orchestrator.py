@@ -78,6 +78,23 @@ RESULTS_PROMPT_CHARS = 24000
 MIGRATION_PROMPT_CHARS = 20000
 EXECUTOR_INCOMPLETE_STDOUT_CHARS = 8000
 EXECUTOR_INCOMPLETE_STDERR_CHARS = 16000
+EXECUTOR_EVIDENCE_REPORT_CHARS = 12000
+EXECUTOR_REQUIRED_EVIDENCE_HEADINGS = (
+    "Acceptance Evidence",
+    "Verification Evidence",
+    "Changed Files",
+    "Outcome",
+)
+INCOMPLETE_EVIDENCE_PATTERNS = (
+    r"\bstill\s+running\b",
+    r"\bin\s+progress\b",
+    r"\bnot\s+run\b",
+    r"\bnot\s+tested\b",
+    r"\buntested\b",
+    r"\bskipped\b",
+    r"\bto\s+be\s+verified\b",
+    r"\bneeds?\s+verification\b",
+)
 
 
 def ensure_workflow_files(
@@ -238,6 +255,17 @@ def count_results_sections(results_text: str, heading: str) -> int:
     return len(pattern.findall(results_text))
 
 
+def latest_results_section(results_text: str, heading: str) -> str | None:
+    pattern = re.compile(
+        rf"^## {re.escape(heading)}\s*$\n?(?P<body>.*?)(?=^## |\Z)",
+        re.MULTILINE | re.DOTALL,
+    )
+    matches = list(pattern.finditer(results_text))
+    if not matches:
+        return None
+    return matches[-1].group("body").strip()
+
+
 def append_results_section_with_index(
     paths: WorkflowPaths,
     heading: str,
@@ -304,6 +332,162 @@ def artifact_index_summary(paths: WorkflowPaths, *, max_entries: int = 12) -> st
         lines.append(prefix)
 
     return "\n".join(lines) if lines else "No indexed artifacts yet."
+
+
+def markdown_heading_present(section_text: str, heading: str) -> bool:
+    pattern = re.compile(rf"^###\s+{re.escape(heading)}\s*$", re.MULTILINE | re.IGNORECASE)
+    return bool(pattern.search(section_text))
+
+
+def markdown_subsection(section_text: str, heading: str) -> str:
+    pattern = re.compile(
+        rf"^###\s+{re.escape(heading)}\s*$\n?(?P<body>.*?)(?=^### |\Z)",
+        re.MULTILINE | re.DOTALL | re.IGNORECASE,
+    )
+    match = pattern.search(section_text)
+    return match.group("body").strip() if match else ""
+
+
+def has_meaningful_evidence(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped:
+        return False
+    placeholder_patterns = (
+        r"^\s*(?:-|_|\*|n/?a|none|tbd|todo|not applicable)\s*\.?\s*$",
+        r"\bno\s+evidence\b",
+        r"\bnone\s+recorded\b",
+    )
+    return not any(re.search(pattern, stripped, re.IGNORECASE) for pattern in placeholder_patterns)
+
+
+def section_mentions_item(section_text: str, item: Any) -> bool:
+    item_text = str(item).strip()
+    if not item_text:
+        return True
+    lowered_section = section_text.lower()
+    lowered_item = item_text.lower()
+    if lowered_item in lowered_section:
+        return True
+    tokens = [
+        token
+        for token in re.findall(r"[A-Za-z0-9_.:/=-]{4,}", lowered_item)
+        if token not in {"that", "with", "from", "this", "step", "must", "should"}
+    ]
+    if not tokens:
+        return False
+    needed = 1 if len(tokens) <= 2 else min(3, len(tokens))
+    return sum(1 for token in tokens if token in lowered_section) >= needed
+
+
+def validate_executor_evidence(section_text: str, step: dict[str, Any]) -> list[str]:
+    issues: list[str] = []
+    for heading in EXECUTOR_REQUIRED_EVIDENCE_HEADINGS:
+        if not markdown_heading_present(section_text, heading):
+            issues.append(f"Missing required `### {heading}` subsection.")
+
+    acceptance_section = markdown_subsection(section_text, "Acceptance Evidence")
+    verification_section = markdown_subsection(section_text, "Verification Evidence")
+    changed_files_section = markdown_subsection(section_text, "Changed Files")
+    outcome_section = markdown_subsection(section_text, "Outcome")
+
+    evidence_sections = {
+        "Acceptance Evidence": acceptance_section,
+        "Verification Evidence": verification_section,
+        "Changed Files": changed_files_section,
+        "Outcome": outcome_section,
+    }
+    for label, body in evidence_sections.items():
+        if not has_meaningful_evidence(body):
+            issues.append(f"`### {label}` does not contain meaningful evidence.")
+
+    for index, criterion in enumerate(step.get("acceptance_criteria", []), start=1):
+        if not section_mentions_item(acceptance_section, criterion):
+            issues.append(
+                f"Acceptance criterion {index} is not explicitly mapped in `### Acceptance Evidence`: "
+                f"{criterion}"
+            )
+
+    for index, check in enumerate(step.get("verification", []), start=1):
+        if not section_mentions_item(verification_section, check):
+            issues.append(
+                f"Verification requirement {index} is not explicitly mapped in `### Verification Evidence`: "
+                f"{check}"
+            )
+
+    if re.search(
+        r"\b(?:exit|return)\s*(?:code)?\s*[:=]\s*-?[0-9]+\b|\b(?:exit|return)\s+code\b|\bexited?\s+[0-9]+\b",
+        verification_section,
+        re.IGNORECASE,
+    ):
+        pass
+    elif re.search(
+        r"\b(?:python|pytest|npm|yarn|pnpm|uv|cargo|go|bash|sh|make|cmake)\b",
+        verification_section,
+    ):
+        issues.append(
+            "`### Verification Evidence` mentions command-like checks but does not record an exit/return code."
+        )
+
+    combined_evidence = "\n".join([acceptance_section, verification_section, outcome_section])
+    for pattern in INCOMPLETE_EVIDENCE_PATTERNS:
+        if re.search(pattern, combined_evidence, re.IGNORECASE):
+            issues.append(
+                "Evidence contains incomplete-verification language such as still running, skipped, or not tested."
+            )
+            break
+
+    return issues
+
+
+def write_executor_evidence_failure_artifact(
+    paths: WorkflowPaths,
+    *,
+    step_id: str,
+    expected_heading: str,
+    section_text: str,
+    issues: list[str],
+) -> Path:
+    paths.command_artifacts_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    safe_step = re.sub(r"[^A-Za-z0-9_.-]+", "-", step_id).strip("-") or "step"
+    report_path = paths.command_artifacts_dir / f"{timestamp}_executor_evidence_{safe_step}.report.md"
+    report_path.write_text(
+        "\n".join(
+            [
+                f"# Executor Evidence Contract Failure - {step_id}",
+                "",
+                "The executor appended the required step section, but the section did not include complete verification evidence.",
+                "",
+                f"- Expected heading: `## {expected_heading}`",
+                f"- Results file: `{paths.results_md}`",
+                "",
+                "## Issues",
+                "",
+                *[f"- {issue}" for issue in issues],
+                "",
+                "## Required Result Subsections",
+                "",
+                *[f"- `### {heading}`" for heading in EXECUTOR_REQUIRED_EVIDENCE_HEADINGS],
+                "",
+                "## Captured Step Section",
+                "",
+                "```markdown",
+                clip_text(section_text, EXECUTOR_EVIDENCE_REPORT_CHARS, from_end=True),
+                "```",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    append_artifact_record(
+        paths,
+        category="executor_evidence_report",
+        path=report_path,
+        label=f"{step_id} evidence contract report",
+        step_id=step_id,
+        metadata={"stage": "executor_evidence_contract"},
+    )
+    return report_path
 
 
 def index_existing_workspace_artifacts(paths: WorkflowPaths) -> None:
@@ -882,7 +1066,13 @@ Required behavior:
 - Prefer committed, idempotent setup helpers over one-off shell history. If a prerequisite is large, make the setup resumable and cache-aware so later workflow runs do not repeat the download or extraction.
 - Reserve requests for human intervention for cases that truly require operator action outside the repository, such as missing permissions, credentials, cluster allocation, or external services you cannot control.
 - Append a new section to `{paths.results_md}` titled `Step {step['id']} - {step['title']}`.
-- In that section include: summary of changes, files changed, verification performed, outcome, and any remaining risks.
+- In that section include these exact third-level subsections:
+  - `### Acceptance Evidence`: map every acceptance criterion to `pass`, `fail`, or `inconclusive` with concrete evidence.
+  - `### Verification Evidence`: map every verification requirement to the command/check performed, working directory, exit/return code when command-based, artifact path when available, and result.
+  - `### Changed Files`: list every changed file and why it changed, or state that no files changed.
+  - `### Outcome`: state `pass`, `fail`, or `inconclusive`, with remaining risks.
+- Do not write the step result section until required commands/checks have finished and the evidence above is complete.
+- If a required verification is skipped, still record it under `### Verification Evidence` with `fail` or `inconclusive` and a concrete blocker; do not present skipped or still-running work as complete.
 - Do not modify step statuses in `{paths.plan_md}`.
 - Do not continue to the next step.
 
@@ -949,12 +1139,22 @@ Return JSON only with this schema:
   "outcome_status": "pass" | "fail" | "inconclusive",
   "outcome_reason": "short explanation of the outcome status",
   "summary": "short review summary",
+  "acceptance_results": [
+    {{"criterion": "criterion text", "status": "pass|fail|inconclusive", "evidence": "specific evidence from results/artifacts"}}
+  ],
+  "verification_results": [
+    {{"check": "verification text", "status": "pass|fail|inconclusive", "evidence": "command/check, exit code when applicable, and artifact reference"}}
+  ],
   "required_changes": ["change 1", "change 2"],
   "human_intervention_required": true or false,
   "human_intervention_reason": "short reason or empty string"
 }}
 
 Approve only if the step is implemented, verified, and evaluated against its acceptance criteria well enough to move on.
+Reject if the latest step result section is missing any of these subsections: `### Acceptance Evidence`, `### Verification Evidence`, `### Changed Files`, or `### Outcome`.
+Reject if any acceptance criterion or verification requirement lacks specific evidence in the latest step result section.
+Reject if command-based verification lacks an exit/return code, unless the result section explains why no command was applicable for that requirement.
+Reject if required verification is described as still running, skipped, not tested, or to be verified later.
 Set `outcome_status` to `pass` when the step completed and achieved its intended outcome, `fail` when the step executed but the measured outcome is unacceptable, and `inconclusive` when the step completed but the result cannot yet be judged confidently.
 If any acceptance criterion is unmet, do not use `outcome_status=pass`; either reject the step or approve it with `outcome_status=fail` / `inconclusive` so follow-up work remains visible.
 Use `approved=true` with `outcome_status=fail` when the workflow should continue but the poor result must remain visible as a follow-on issue instead of blocking step completion.
@@ -1378,6 +1578,56 @@ def run_executor(paths: WorkflowPaths, config: dict[str, Any], step_id: str | No
         )
         raise WorkflowError(failure_summary)
 
+    latest_section = latest_results_section(results_after, step_results_heading)
+    evidence_issues = validate_executor_evidence(latest_section or "", step)
+    if evidence_issues:
+        report_path = write_executor_evidence_failure_artifact(
+            paths,
+            step_id=step["id"],
+            expected_heading=step_results_heading,
+            section_text=latest_section or "",
+            issues=evidence_issues,
+        )
+        failure_summary = (
+            "Executor command completed and appended the step section, but the section failed the "
+            "verification evidence contract.\n\n"
+            "Issues:\n"
+            + "\n".join(f"- {issue}" for issue in evidence_issues)
+            + "\n\n"
+            f"Evidence contract report: {report_path}"
+        )
+        append_results_section_with_index(
+            paths,
+            f"Incomplete Verification Evidence - {step['id']}",
+            "\n".join(
+                [
+                    f"Step: `{step['id']}`",
+                    "",
+                    "The executor appended a step result section, but it did not provide enough structured evidence for review.",
+                    "",
+                    "Issues:",
+                    *[f"- {issue}" for issue in evidence_issues],
+                    "",
+                    "Next action:",
+                    "- Resume this same step and update the step result section with complete acceptance and verification evidence.",
+                    f"- Evidence contract report: `{report_path}`",
+                ]
+            ),
+            step_id=step["id"],
+        )
+        mark_step_status(
+            paths.plan_md,
+            step["id"],
+            "needs_changes",
+            event="executor_evidence_contract_failed",
+            details=clip_history_details(failure_summary),
+        )
+        write_progress_snapshot(
+            paths,
+            build_manifest_progress(paths, latest_step=step),
+        )
+        raise WorkflowError(failure_summary)
+
     mark_step_status(
         paths.plan_md,
         step["id"],
@@ -1441,6 +1691,9 @@ def parse_review_json(raw_output: str) -> StepResult:
     if not isinstance(human_intervention_reason, str):
         raise WorkflowError("Reviewer JSON field 'human_intervention_reason' must be a string.")
 
+    acceptance_results = parse_review_result_list(payload.get("acceptance_results", []), "acceptance_results")
+    verification_results = parse_review_result_list(payload.get("verification_results", []), "verification_results")
+
     return StepResult(
         approved=approved,
         summary=summary or "No review summary provided.",
@@ -1450,7 +1703,41 @@ def parse_review_json(raw_output: str) -> StepResult:
         outcome_reason=outcome_reason.strip(),
         human_intervention_required=human_intervention_required,
         human_intervention_reason=human_intervention_reason.strip(),
+        acceptance_results=acceptance_results,
+        verification_results=verification_results,
     )
+
+
+def parse_review_result_list(value: Any, field_name: str) -> list[dict[str, str]]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise WorkflowError(f"Reviewer JSON field '{field_name}' must be a list when present.")
+
+    parsed: list[dict[str, str]] = []
+    for index, item in enumerate(value, start=1):
+        if isinstance(item, dict):
+            parsed.append({str(key): str(val) for key, val in item.items()})
+        elif isinstance(item, str):
+            parsed.append({"item": item})
+        else:
+            raise WorkflowError(
+                f"Reviewer JSON field '{field_name}' item {index} must be an object or string."
+            )
+    return parsed
+
+
+def format_review_result_matrix(items: list[dict[str, str]]) -> list[str]:
+    if not items:
+        return ["- None provided."]
+    lines: list[str] = []
+    for item in items:
+        status = item.get("status", "unknown")
+        label = item.get("criterion") or item.get("check") or item.get("item") or "item"
+        evidence = item.get("evidence", "").strip()
+        suffix = f" - {evidence}" if evidence else ""
+        lines.append(f"- `{status}` {label}{suffix}")
+    return lines
 
 
 def run_review(paths: WorkflowPaths, config: dict[str, Any], step_id: str | None = None) -> StepResult:
@@ -1517,6 +1804,22 @@ def run_review(paths: WorkflowPaths, config: dict[str, Any], step_id: str | None
                 "",
                 "Outcome detail:",
                 review.outcome_reason,
+            ]
+        )
+    if review.acceptance_results:
+        review_body.extend(
+            [
+                "",
+                "Acceptance results:",
+                *format_review_result_matrix(review.acceptance_results),
+            ]
+        )
+    if review.verification_results:
+        review_body.extend(
+            [
+                "",
+                "Verification results:",
+                *format_review_result_matrix(review.verification_results),
             ]
         )
     if review.required_changes:

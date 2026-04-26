@@ -134,6 +134,8 @@ class StepResult:
     outcome_reason: str = ""
     human_intervention_required: bool = False
     human_intervention_reason: str = ""
+    acceptance_results: list[dict[str, str]] = dataclasses.field(default_factory=list)
+    verification_results: list[dict[str, str]] = dataclasses.field(default_factory=list)
 
 
 SUMMARY_STATUS_DONE = "done"

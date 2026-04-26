@@ -171,6 +171,19 @@ What `migrate` does:
 - `artifacts/`: raw logs and failure artifacts
 - `runtime.env`: per-workspace model overrides
 
+## Step Verification Contract
+
+After an executor run, the orchestrator now checks the newest `results.md` section for the current step before allowing review.
+The section must be headed `## Step <id> - <title>` and must include these exact subsections:
+
+- `### Acceptance Evidence`: every acceptance criterion mapped to `pass`, `fail`, or `inconclusive` with concrete evidence.
+- `### Verification Evidence`: every verification requirement mapped to the command or check performed, working directory, exit/return code when command-based, artifact path when available, and result.
+- `### Changed Files`: every changed file and why it changed, or an explicit statement that no files changed.
+- `### Outcome`: `pass`, `fail`, or `inconclusive`, plus remaining risks.
+
+If the evidence is missing, vague, still running, skipped, not tested, or lacks command exit codes for command-based checks, the step remains `needs_changes`.
+The workflow writes an evidence contract report under `artifacts/command_failures/` so the same step can be resumed with the missing proof.
+
 ## Wrappers
 
 - `workflow/scripts/run_gemini_noninteractive.sh`
