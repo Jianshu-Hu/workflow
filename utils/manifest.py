@@ -292,8 +292,23 @@ def load_plan_manifest(plan_path: Path) -> tuple[dict[str, Any], str]:
     manifest = yaml.safe_load(manifest_text) or {}
     if not isinstance(manifest, dict):
         raise WorkflowError("Plan manifest must be a YAML mapping.")
+    normalize_manifest(manifest)
     validate_manifest(manifest)
     return sync_workflow_outcome(manifest), plan_text
+
+
+def normalize_manifest(manifest: dict[str, Any]) -> None:
+    steps = manifest.get("steps")
+    if not isinstance(steps, list):
+        return
+
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        implementation_summary = step.get("implementation_summary")
+        if isinstance(implementation_summary, str):
+            summary = implementation_summary.strip()
+            step["implementation_summary"] = [summary] if summary else []
 
 
 def validate_manifest(manifest: dict[str, Any]) -> None:
@@ -377,6 +392,7 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
 
 def compact_manifest_for_storage(manifest: dict[str, Any]) -> dict[str, Any]:
     compact = sync_workflow_outcome(copy.deepcopy(manifest))
+    normalize_manifest(compact)
 
     history = compact.get("history")
     if isinstance(history, list):

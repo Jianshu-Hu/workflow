@@ -64,6 +64,7 @@ from utils.manifest import (
     get_step,
     load_plan_manifest,
     mark_step_status,
+    normalize_manifest,
     render_plan_document,
     save_plan_manifest,
     validate_manifest,
@@ -923,6 +924,7 @@ Requirements:
 - Keep the current step and pending future steps concrete and detailed enough to execute.
 - If detailed evidence matters, reference `results.md` or workflow artifacts instead of embedding bulk output in the plan.
 - Do not mark any step approved before review.
+- If a step includes implementation_summary, it must be a YAML list of strings. Do not emit implementation_summary as a plain string or block scalar.
 - Inspect {paths.progress_md.name} and continue from the latest recorded workflow state instead of restarting completed work.
 - Inspect `{paths.migration_md.name}` too when it exists.
 - If the existing manifest and {paths.progress_md.name} disagree, prefer the more recent concrete execution evidence in {paths.results_md.name} and reconcile the plan.
@@ -999,6 +1001,7 @@ Requirements:
 - Keep already approved/completed history intact unless it is obviously malformed.
 - Keep the plan aligned with the latest workflow state from `{paths.progress_md.name}` and `{paths.results_md.name}`.
 - Use YAML block scalars (`|-`) or quoted strings for any multi-line value.
+- If a step includes implementation_summary, it must be a YAML list of strings. Do not emit implementation_summary as a plain string or block scalar.
 - Do not insert prose inside the YAML manifest except as valid YAML string content.
 
 Parser error:
@@ -1033,6 +1036,7 @@ def parse_planner_manifest(planner_output: str) -> dict[str, Any]:
     manifest = yaml.safe_load(manifest_text) or {}
     if not isinstance(manifest, dict):
         raise WorkflowError("Planner output did not contain a valid manifest mapping.")
+    normalize_manifest(manifest)
     validate_manifest(manifest)
     if not manifest["steps"]:
         raise WorkflowError("Planner did not populate any steps in the manifest.")
