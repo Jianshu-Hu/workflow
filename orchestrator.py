@@ -76,6 +76,8 @@ PLAN_PROMPT_CHARS = 32000
 PROGRESS_PROMPT_CHARS = 12000
 RESULTS_PROMPT_CHARS = 24000
 MIGRATION_PROMPT_CHARS = 20000
+EXECUTOR_INCOMPLETE_STDOUT_CHARS = 8000
+EXECUTOR_INCOMPLETE_STDERR_CHARS = 16000
 
 
 def ensure_workflow_files(
@@ -401,6 +403,68 @@ def write_command_failure_artifacts(
     return stdout_path, stderr_path
 
 
+def write_executor_incomplete_artifacts(
+    paths: WorkflowPaths,
+    *,
+    step_id: str,
+    result: subprocess.CompletedProcess[str],
+    expected_heading: str,
+) -> tuple[Path, Path, Path]:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    safe_step = re.sub(r"[^A-Za-z0-9_.-]+", "-", step_id).strip("-") or "step"
+    base_name = f"{timestamp}_executor_incomplete_{safe_step}"
+    stdout_path = paths.command_artifacts_dir / f"{base_name}.stdout.txt"
+    stderr_path = paths.command_artifacts_dir / f"{base_name}.stderr.txt"
+    report_path = paths.command_artifacts_dir / f"{base_name}.report.md"
+
+    stdout_path.write_text(result.stdout, encoding="utf-8")
+    stderr_path.write_text(result.stderr, encoding="utf-8")
+    report_path.write_text(
+        "\n".join(
+            [
+                f"# Incomplete Executor Step - {step_id}",
+                "",
+                "The executor command exited with code 0 but did not append the required results section.",
+                "",
+                f"- Expected heading: `## {expected_heading}`",
+                f"- Results file: `{paths.results_md}`",
+                f"- Stdout artifact: `{stdout_path}`",
+                f"- Stderr artifact: `{stderr_path}`",
+                "",
+                "## Stdout Tail",
+                "",
+                "```text",
+                clip_text(result.stdout, EXECUTOR_INCOMPLETE_STDOUT_CHARS, from_end=True),
+                "```",
+                "",
+                "## Stderr Tail",
+                "",
+                "```text",
+                clip_text(result.stderr, EXECUTOR_INCOMPLETE_STDERR_CHARS, from_end=True),
+                "```",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    for category, path, label in [
+        ("executor_incomplete_stdout", stdout_path, f"{step_id} incomplete stdout"),
+        ("executor_incomplete_stderr", stderr_path, f"{step_id} incomplete stderr"),
+        ("executor_incomplete_report", report_path, f"{step_id} incomplete report"),
+    ]:
+        append_artifact_record(
+            paths,
+            category=category,
+            path=path,
+            label=label,
+            step_id=step_id,
+            metadata={"stage": "executor_incomplete"},
+        )
+
+    return stdout_path, stderr_path, report_path
+
+
 def summarize_command_failure(
     paths: WorkflowPaths,
     *,
@@ -528,7 +592,8 @@ Requirements:
 - If the latest review rejected a step but did not require human intervention, update the plan so the next loop iteration attempts a concrete fix instead of repeating the same failed action blindly.
 - Preserve already approved steps unless the evidence shows they are invalid.
 - If remediation requires debugging the workflow itself, add explicit repair or diagnostic steps rather than treating the issue as a permanent external blocker.
-- Prefer workflow-owned helper scripts and artifacts under the workflow workspace when automation glue is needed.
+- Prefer workflow-owned helper scripts and artifacts under the actual workflow root `{paths.root}` when automation glue is needed.
+- Use the exact workflow root `{paths.root}` in all implementation and verification paths. Do not invent, create, symlink, or reference a repo-root `workflow_workspace` alias.
 - If a failure is caused by missing public checkpoints, datasets, assets, or packages and the repository already documents or scripts how to acquire them, treat that as workflow work. Add an explicit prerequisite-staging or cache-population step instead of immediately requiring human intervention.
 - For large or slow prerequisite downloads, prefer idempotent, resumable staging steps that materialize stable shared paths or caches before the expensive evaluation step runs.
 - Avoid modifying tracked files inside submodules unless there is no viable workflow-local or repository-local alternative.
@@ -539,6 +604,11 @@ Parent workflow runtime snapshot:
 ```text
 {parent_runtime}
 ```
+
+Path placeholders:
+- `{{workspace}}`: {paths.root}
+- `{{repo_root}}`: {paths.repo_root}
+- `{{results}}`: {paths.results_md}
 
 Task file:
 ```markdown
@@ -793,10 +863,13 @@ Required behavior:
 - Read `{paths.progress_md}` first and use it to avoid redoing already completed work.
 - Use `{paths.repo_root}` as the repository working root when you run commands or edit files.
 - Treat submodule-owned areas as read-only by default, and prefer creating helper scripts or artifacts under `{paths.root}` when you need workflow-specific glue.
+- Use `{paths.root}` directly for workflow-local files in implementation and verification commands. Do not create, update, or depend on a repo-root `workflow_workspace` directory or symlink.
 - Before concluding that the host GPU, renderer, or environment is broken, compare your own execution environment against the parent workflow snapshot above. If they differ, treat that as a workflow-launch or sandbox mismatch and fix the workflow/scripts/config so future runs use the same environment as the parent workflow shell.
 - Make the necessary repository changes.
 - Ensure the acceptance criteria for this step are satisfied, or clearly record why they are not satisfied.
 - Run the verification listed for this step.
+- Do not finish your executor run while a command required for this step is still running in the background. Wait for it to finish, inspect its exit status and logs, then complete verification.
+- Do not append the required step section until the step is actually complete or you have confirmed and documented a terminal blocker. A progress update like "training is still running" is not a valid completion of the executor contract.
 - If the first attempt fails but the failure appears fixable from this repository, repair the issue and rerun verification within the same step instead of stopping at the first error.
 - If verification fails because a public prerequisite is missing but the repository contains a documented or scriptable way to fetch or materialize it, implement that prerequisite staging in the workflow and rerun instead of treating it as immediate operator work.
 - Prefer committed, idempotent setup helpers over one-off shell history. If a prerequisite is large, make the setup resumable and cache-aware so later workflow runs do not repeat the download or extraction.
@@ -1245,14 +1318,44 @@ def run_executor(paths: WorkflowPaths, config: dict[str, Any], step_id: str | No
     results_after = paths.results_md.read_text(encoding="utf-8")
     results_section_count_after = count_results_sections(results_after, step_results_heading)
     if results_section_count_after <= results_section_count_before:
+        stdout_path, stderr_path, report_path = write_executor_incomplete_artifacts(
+            paths,
+            step_id=step["id"],
+            result=result,
+            expected_heading=step_results_heading,
+        )
         failure_summary = summarize_command_failure(
             paths,
             stage="executor_contract",
             message=(
                 "Executor command completed but did not append the required step section to "
-                f"`{paths.results_md.name}` with heading `## {step_results_heading}`."
+                f"`{paths.results_md.name}` with heading `## {step_results_heading}`. "
+                "This usually means the executor stopped early, reported partial progress, "
+                "or wrote the wrong heading/path instead of satisfying the step contract. "
+                f"Review the incomplete-step report at `{report_path}`."
             ),
             result=result,
+            step_id=step["id"],
+        )
+        append_results_section_with_index(
+            paths,
+            f"Incomplete Executor Attempt - {step['id']}",
+            "\n".join(
+                [
+                    f"Step: `{step['id']}`",
+                    "",
+                    "The executor exited successfully at the process level but did not append the required step result section.",
+                    f"Expected heading: `## {step_results_heading}`",
+                    "",
+                    "Artifacts:",
+                    f"- Incomplete attempt report: `{report_path}`",
+                    f"- Full stdout: `{stdout_path}`",
+                    f"- Full stderr: `{stderr_path}`",
+                    "",
+                    "Next action:",
+                    "- Resume this same step and complete the acceptance criteria before writing the required step section.",
+                ]
+            ),
             step_id=step["id"],
         )
         mark_step_status(

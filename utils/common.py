@@ -322,7 +322,7 @@ def config_int(
 def runtime_context(paths: WorkflowPaths) -> str:
     details = {
         "repo_root": str(paths.repo_root),
-        "workflow_workspace": str(paths.root),
+        "workflow_root": str(paths.root),
         "orchestrator_cwd": os.getcwd(),
         "hostname": os.uname().nodename,
         "python_executable": sys.executable,
