@@ -362,10 +362,20 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
         verification = step.get("verification", [])
         if not isinstance(verification, list):
             raise WorkflowError(f"Step {step_id} verification must be a list.")
+        if not all(isinstance(item, str) and item.strip() for item in verification):
+            raise WorkflowError(f"Step {step_id} verification must be a list of non-empty strings.")
 
         acceptance_criteria = step.get("acceptance_criteria", [])
         if not isinstance(acceptance_criteria, list):
             raise WorkflowError(f"Step {step_id} acceptance_criteria must be a list.")
+        if not all(isinstance(item, str) and item.strip() for item in acceptance_criteria):
+            raise WorkflowError(f"Step {step_id} acceptance_criteria must be a list of non-empty strings.")
+
+        implementation = step.get("implementation", [])
+        if not isinstance(implementation, list):
+            raise WorkflowError(f"Step {step_id} implementation must be a list.")
+        if not all(isinstance(item, str) and item.strip() for item in implementation):
+            raise WorkflowError(f"Step {step_id} implementation must be a list of non-empty strings.")
 
         outcome_status = step.get("outcome_status")
         if outcome_status is not None:

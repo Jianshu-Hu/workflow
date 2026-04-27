@@ -176,8 +176,8 @@ What `migrate` does:
 After an executor run, the orchestrator now checks the newest `results.md` section for the current step before allowing review.
 The section must be headed `## Step <id> - <title>` and must include these exact subsections:
 
-- `### Acceptance Evidence`: every acceptance criterion mapped to `pass`, `fail`, or `inconclusive` with concrete evidence.
-- `### Verification Evidence`: every verification requirement mapped to the command or check performed, working directory, exit/return code when command-based, artifact path when available, and result.
+- `### Acceptance Evidence`: every acceptance criterion mapped to `pass`, `fail`, or `inconclusive` with concrete evidence. Use the criterion ids from the executor prompt (`AC1`, `AC2`, ...); the orchestrator also keeps a legacy text-matching fallback for older result sections.
+- `### Verification Evidence`: every verification requirement mapped to the command or check performed, working directory, exit/return code when command-based, artifact path when available, and result. Use the verification ids from the executor prompt (`V1`, `V2`, ...); the orchestrator also keeps a legacy text-matching fallback for older result sections.
 - `### Changed Files`: every changed file and why it changed, or an explicit statement that no files changed.
 - `### Outcome`: `pass`, `fail`, or `inconclusive`, plus remaining risks.
 

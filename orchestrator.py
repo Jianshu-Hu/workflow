@@ -86,6 +86,52 @@ EXECUTOR_REQUIRED_EVIDENCE_HEADINGS = (
     "Changed Files",
     "Outcome",
 )
+EVIDENCE_MATCH_STOPWORDS = {
+    "about",
+    "above",
+    "after",
+    "again",
+    "against",
+    "all",
+    "also",
+    "before",
+    "being",
+    "check",
+    "completion",
+    "condition",
+    "confirms",
+    "concrete",
+    "criteria",
+    "criterion",
+    "done",
+    "every",
+    "from",
+    "have",
+    "into",
+    "must",
+    "outcome",
+    "pass",
+    "passed",
+    "require",
+    "required",
+    "requires",
+    "result",
+    "results",
+    "run",
+    "runs",
+    "script",
+    "should",
+    "shows",
+    "step",
+    "that",
+    "the",
+    "this",
+    "through",
+    "updated",
+    "verification",
+    "with",
+    "without",
+}
 INCOMPLETE_EVIDENCE_PATTERNS = (
     r"\bstill\s+running\b",
     r"\bin\s+progress\b",
@@ -513,6 +559,33 @@ def has_meaningful_evidence(text: str) -> bool:
     return not any(re.search(pattern, stripped, re.IGNORECASE) for pattern in placeholder_patterns)
 
 
+def evidence_reference_present(section_text: str, prefix: str, index: int) -> bool:
+    """Return true when a section explicitly references an acceptance/check id.
+
+    The executor prompt asks for stable ids such as `AC1` and `V2`.  Matching
+    these ids is much less brittle than trying to infer criterion coverage from
+    paraphrased prose.  Keep this permissive about punctuation so markdown list
+    styles like `- AC1:` and `- **AC1** -` are both accepted.
+    """
+    pattern = re.compile(
+        rf"(?<![A-Za-z0-9]){re.escape(prefix)}\s*0*{index}(?![A-Za-z0-9])",
+        re.IGNORECASE,
+    )
+    return bool(pattern.search(section_text))
+
+
+def evidence_match_tokens(text: str) -> list[str]:
+    tokens = []
+    for token in re.findall(r"[A-Za-z0-9_.:/=-]+", text.lower()):
+        token = token.strip("`'\".,;:()[]{}")
+        if len(token) < 4:
+            continue
+        if token in EVIDENCE_MATCH_STOPWORDS:
+            continue
+        tokens.append(token)
+    return tokens
+
+
 def section_mentions_item(section_text: str, item: Any) -> bool:
     item_text = str(item).strip()
     if not item_text:
@@ -521,15 +594,20 @@ def section_mentions_item(section_text: str, item: Any) -> bool:
     lowered_item = item_text.lower()
     if lowered_item in lowered_section:
         return True
-    tokens = [
-        token
-        for token in re.findall(r"[A-Za-z0-9_.:/=-]{4,}", lowered_item)
-        if token not in {"that", "with", "from", "this", "step", "must", "should"}
-    ]
+    section_tokens = set(evidence_match_tokens(lowered_section))
+    tokens = evidence_match_tokens(lowered_item)
     if not tokens:
         return False
-    needed = 1 if len(tokens) <= 2 else min(3, len(tokens))
-    return sum(1 for token in tokens if token in lowered_section) >= needed
+    strong_tokens = [token for token in tokens if any(ch.isdigit() for ch in token) or "." in token or "/" in token]
+    if strong_tokens and any(token in section_tokens or token in lowered_section for token in strong_tokens):
+        needed = 1 if len(tokens) <= 2 else min(2, len(tokens))
+    else:
+        needed = 1 if len(tokens) <= 2 else min(3, len(tokens))
+    return sum(1 for token in tokens if token in section_tokens or token in lowered_section) >= needed
+
+
+def evidence_maps_item(section_text: str, item: Any, *, prefix: str, index: int) -> bool:
+    return evidence_reference_present(section_text, prefix, index) or section_mentions_item(section_text, item)
 
 
 def validate_executor_evidence(section_text: str, step: dict[str, Any]) -> list[str]:
@@ -554,16 +632,16 @@ def validate_executor_evidence(section_text: str, step: dict[str, Any]) -> list[
             issues.append(f"`### {label}` does not contain meaningful evidence.")
 
     for index, criterion in enumerate(step.get("acceptance_criteria", []), start=1):
-        if not section_mentions_item(acceptance_section, criterion):
+        if not evidence_maps_item(acceptance_section, criterion, prefix="AC", index=index):
             issues.append(
-                f"Acceptance criterion {index} is not explicitly mapped in `### Acceptance Evidence`: "
+                f"Acceptance criterion AC{index} is not explicitly mapped in `### Acceptance Evidence`: "
                 f"{criterion}"
             )
 
     for index, check in enumerate(step.get("verification", []), start=1):
-        if not section_mentions_item(verification_section, check):
+        if not evidence_maps_item(verification_section, check, prefix="V", index=index):
             issues.append(
-                f"Verification requirement {index} is not explicitly mapped in `### Verification Evidence`: "
+                f"Verification requirement V{index} is not explicitly mapped in `### Verification Evidence`: "
                 f"{check}"
             )
 
@@ -913,9 +991,9 @@ Requirements:
   - title: concise label
   - status: set to pending
   - objective: short paragraph
-  - acceptance_criteria: list of concrete conditions that define acceptable outcome for the step
-  - implementation: list of concrete build actions
-  - verification: list of commands or checks that prove the step is finished
+  - acceptance_criteria: YAML list of strings; each item is one concrete condition that defines acceptable outcome for the step
+  - implementation: YAML list of strings; each item is one concrete build action
+  - verification: YAML list of strings; each item is one command or check that proves the step is finished
 - If this is the first plan, set manifest.current_step to the first step id and manifest.status to pending.
 - If this is a replan, preserve approved steps and set manifest.current_step / manifest.status to the next actionable step instead of restarting from the beginning.
 - Keep the human-readable sections below the manifest in sync with the manifest.
@@ -924,6 +1002,7 @@ Requirements:
 - Keep the current step and pending future steps concrete and detailed enough to execute.
 - If detailed evidence matters, reference `results.md` or workflow artifacts instead of embedding bulk output in the plan.
 - Do not mark any step approved before review.
+- Keep `acceptance_criteria`, `implementation`, and `verification` as separate sibling YAML keys. Never let text such as `implementation:` or `verification:` appear inside an acceptance criterion item.
 - If a step includes implementation_summary, it must be a YAML list of strings. Do not emit implementation_summary as a plain string or block scalar.
 - Inspect {paths.progress_md.name} and continue from the latest recorded workflow state instead of restarting completed work.
 - Inspect `{paths.migration_md.name}` too when it exists.
@@ -1001,6 +1080,7 @@ Requirements:
 - Keep already approved/completed history intact unless it is obviously malformed.
 - Keep the plan aligned with the latest workflow state from `{paths.progress_md.name}` and `{paths.results_md.name}`.
 - Use YAML block scalars (`|-`) or quoted strings for any multi-line value.
+- Every step's `acceptance_criteria`, `implementation`, and `verification` fields must be YAML lists of strings. Keep them as separate sibling keys.
 - If a step includes implementation_summary, it must be a YAML list of strings. Do not emit implementation_summary as a plain string or block scalar.
 - Do not insert prose inside the YAML manifest except as valid YAML string content.
 
@@ -1174,9 +1254,15 @@ def build_codex_prompt(
     manifest: dict[str, Any],
     step: dict[str, Any],
 ) -> str:
-    verification_lines = "\n".join(f"- {item}" for item in step.get("verification", [])) or "- None listed"
-    acceptance_lines = "\n".join(f"- {item}" for item in step.get("acceptance_criteria", [])) or "- None listed"
-    implementation_lines = "\n".join(f"- {item}" for item in step.get("implementation", [])) or "- No implementation notes provided"
+    verification_lines = "\n".join(
+        f"- V{index}: {item}" for index, item in enumerate(step.get("verification", []), start=1)
+    ) or "- None listed"
+    acceptance_lines = "\n".join(
+        f"- AC{index}: {item}" for index, item in enumerate(step.get("acceptance_criteria", []), start=1)
+    ) or "- None listed"
+    implementation_lines = "\n".join(
+        f"- I{index}: {item}" for index, item in enumerate(step.get("implementation", []), start=1)
+    ) or "- No implementation notes provided"
     progress_text = clip_text(paths.progress_md.read_text(encoding="utf-8"), PROGRESS_PROMPT_CHARS, from_end=True)
     manifest_text = yaml.safe_dump(
         compact_manifest_for_prompt(manifest),
@@ -1238,8 +1324,8 @@ Required behavior:
 - Apply selected workflow-level lessons only when their stated scope matches the current step. If a lesson requires checks relevant to this step, perform them or record concrete evidence explaining why they do not apply.
 - Append a new section to `{paths.results_md}` titled `Step {step['id']} - {step['title']}`.
 - In that section include these exact third-level subsections:
-  - `### Acceptance Evidence`: map every acceptance criterion to `pass`, `fail`, or `inconclusive` with concrete evidence.
-  - `### Verification Evidence`: map every verification requirement to the command/check performed, working directory, exit/return code when command-based, artifact path when available, and result.
+  - `### Acceptance Evidence`: include one bullet for every acceptance criterion, labeled with its id (`AC1`, `AC2`, ...), and mark each `pass`, `fail`, or `inconclusive` with concrete evidence.
+  - `### Verification Evidence`: include one bullet for every verification requirement, labeled with its id (`V1`, `V2`, ...), and record the command/check performed, working directory, exit/return code when command-based, artifact path when available, and result.
   - `### Changed Files`: list every changed file and why it changed, or state that no files changed.
   - `### Outcome`: state `pass`, `fail`, or `inconclusive`, with remaining risks.
 - Do not write the step result section until required commands/checks have finished and the evidence above is complete.
