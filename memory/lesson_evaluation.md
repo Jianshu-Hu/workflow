@@ -7,6 +7,13 @@ candidate from `workflow/memory/lessons.yaml`.
 The goal is to prevent hallucinated, overgeneralized, or weakly supported lessons
 from becoming global workflow memory.
 
+Lesson candidates should normally come from a concrete workflow event that showed
+the reminder was needed: an implementation correction, review miss, workflow
+mechanism gap, rerun repair, stopped/interrupted run that required human
+intervention before rerun, direct human intervention, or a non-obvious constraint
+discovered through failure. Do not promote lessons merely because an executor
+implemented a step correctly on the first try or followed ordinary best practices.
+
 ## Confidence Scale
 
 - `0`: candidate/init. Stored for review, not injected into future prompts.
@@ -75,12 +82,20 @@ Send the following prompt separately to Codex, Gemini, and Claude.
 You are reviewing a proposed workflow-level lesson for a coding/research workflow.
 
 Your job is to decide whether this lesson is evidence-backed, scoped correctly,
-actionable for future workflows, and falsifiable. Be conservative. Do not approve
-the lesson merely because it sounds plausible.
+actionable for future workflows, triggered by a concrete correction/repair/intervention
+event, and falsifiable. Be conservative. Do not approve the lesson merely because
+it sounds plausible.
 
 Review rules:
 - Treat project-specific handoff facts as unsuitable for global workflow memory.
 - Approve only lessons that can help future unrelated runs.
+- Reject or request revision if the lesson lacks an artifact-backed `trigger_event`
+  and valid `reason_category`. Allowed reason categories:
+  `implementation_correction`, `review_gap`, `workflow_mechanism_gap`,
+  `rerun_repair`, `stopped_run_human_rerun`, `human_intervention`,
+  `non_obvious_constraint_discovered_by_failure`.
+- Reject or request revision if the lesson comes only from a successful first-pass
+  implementation or ordinary best practice.
 - Reject or request revision if the lesson overgeneralizes from one run.
 - Reject or request revision if evidence does not directly support the claim.
 - Reject or request revision if applies_when, does_not_apply_when, required_checks,
@@ -150,6 +165,7 @@ reviews:
 Before setting confidence to `1` or higher:
 
 - The lesson has concrete cited evidence.
+- The lesson has a valid `reason_category` and artifact-backed `trigger_event`.
 - The lesson is cross-run workflow knowledge, not just project state.
 - The lesson has clear `applies_when` and `does_not_apply_when` scope.
 - The lesson has actionable `required_checks`.

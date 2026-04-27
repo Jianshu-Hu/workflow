@@ -148,6 +148,15 @@ LESSON_REJECTED_MIN = -5
 LESSON_REJECTED_MAX = -1
 LESSON_ACTIVE_MIN = 1
 LESSON_ACTIVE_MAX = 10
+LESSON_CANDIDATE_REASON_CATEGORIES = {
+    "implementation_correction",
+    "review_gap",
+    "workflow_mechanism_gap",
+    "rerun_repair",
+    "stopped_run_human_rerun",
+    "human_intervention",
+    "non_obvious_constraint_discovered_by_failure",
+}
 KARPATHY_CODE_INSTRUCTIONS = Path(__file__).resolve().parent / "memory" / "karpathy-code-instructions.md"
 
 
@@ -1450,6 +1459,8 @@ Return JSON only with this schema:
       "id": "stable-kebab-case-id",
       "title": "short title",
       "confidence": 0,
+      "reason_category": "implementation_correction|review_gap|workflow_mechanism_gap|rerun_repair|stopped_run_human_rerun|human_intervention|non_obvious_constraint_discovered_by_failure",
+      "trigger_event": "specific correction, rejection, repair, or intervention in this run that exposed the reusable failure mode",
       "claim": "carefully scoped lesson candidate",
       "applies_when": ["scope condition"],
       "does_not_apply_when": ["out-of-scope condition"],
@@ -1466,8 +1477,9 @@ Return JSON only with this schema:
 
 Approve only if the step is implemented, verified, and evaluated against its acceptance criteria well enough to move on.
 Use selected workflow-level lessons as review context only within their stated scope.
-If the run exposes a reusable workflow-level lesson, return it in `lesson_candidates` with `confidence=0`; do not mark it active or globally approved.
-Propose a lesson candidate only when it is supported by concrete artifacts and includes scope, required checks, and falsification conditions. Do not propose lessons from weak hypotheses or one-off local details.
+Return `lesson_candidates` only for reusable failure modes or non-obvious constraints exposed by correction, rejection, rerun repair, a stopped/interrupted run that needed human intervention before rerun, human intervention, or a workflow/review mechanism gap. Do not propose a lesson merely because the executor succeeded, followed ordinary best practices, or implemented the step correctly on the first try.
+For every lesson candidate, set `confidence=0`, choose one allowed `reason_category`, and cite the concrete `trigger_event` from this run. The trigger event must be artifact-backed and must explain why future executors or reviewers need the reminder.
+Propose a lesson candidate only when it is supported by concrete artifacts and includes scope, required checks, and falsification conditions. Do not propose lessons from weak hypotheses, generic advice, successful first-pass implementations, or one-off local details.
 Reject if the latest step result section is missing any of these subsections: `### Acceptance Evidence`, `### Verification Evidence`, `### Changed Files`, or `### Outcome`.
 Reject if any acceptance criterion or verification requirement lacks specific evidence in the latest step result section.
 Reject if command-based verification lacks an exit/return code, unless the result section explains why no command was applicable for that requirement.
@@ -2042,6 +2054,32 @@ def normalize_lesson_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
+def lesson_candidate_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    return ""
+
+
+def lesson_candidate_list_has_text(value: Any) -> bool:
+    if not isinstance(value, list):
+        return False
+    return any(lesson_candidate_text(item) for item in value)
+
+
+def is_recordable_lesson_candidate(candidate: dict[str, Any]) -> bool:
+    reason_category = lesson_candidate_text(candidate.get("reason_category"))
+    if reason_category not in LESSON_CANDIDATE_REASON_CATEGORIES:
+        return False
+    if not lesson_candidate_text(candidate.get("trigger_event")):
+        return False
+    if not lesson_candidate_text(candidate.get("claim")):
+        return False
+    for key in ("applies_when", "required_checks", "evidence", "falsification_conditions"):
+        if not lesson_candidate_list_has_text(candidate.get(key)):
+            return False
+    return True
+
+
 def parse_lesson_candidates(value: Any) -> list[dict[str, Any]]:
     if value is None:
         return []
@@ -2052,7 +2090,9 @@ def parse_lesson_candidates(value: Any) -> list[dict[str, Any]]:
     for index, item in enumerate(value, start=1):
         if not isinstance(item, dict):
             raise WorkflowError(f"Reviewer JSON field 'lesson_candidates' item {index} must be an object.")
-        candidates.append(normalize_lesson_candidate(item))
+        normalized = normalize_lesson_candidate(item)
+        if is_recordable_lesson_candidate(normalized):
+            candidates.append(normalized)
     return candidates
 
 

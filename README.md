@@ -196,14 +196,16 @@ Lesson confidence is numeric:
 - `1` to `10`: active confidence. Relevant lessons are selected by trigger terms/scope and injected into prompts.
 - `-1` to `-5`: rejected. Kept as an audit record, never injected.
 
-The reviewer can propose new workflow-level lessons in its JSON output.
-Those proposals are written to the workspace-local `lesson_candidates.yaml` with `confidence: 0`.
+The reviewer can propose new workflow-level lessons in its JSON output only when a concrete run event exposed a reusable failure mode or non-obvious constraint.
+Valid triggers include implementation corrections, review gaps, workflow mechanism gaps, rerun repairs, stopped or interrupted runs that required human intervention before rerun, direct human intervention, and constraints discovered through failure.
+Successful first-pass implementations and ordinary best practices should not become lesson candidates.
+Those proposals are written to the workspace-local `lesson_candidates.yaml` with `confidence: 0`, a `reason_category`, and an artifact-backed `trigger_event`.
 They are not added to global active memory automatically.
 
 Human processing flow:
 
 - Inspect `lesson_candidates.yaml` and the cited artifacts.
-- Run `workflow/scripts/evaluate_lesson.sh <workflow-run-folder>` to ask Codex, Gemini, and Claude to independently review whether the lesson is evidence-backed, scoped correctly, actionable, and falsifiable.
+- Run `workflow/scripts/evaluate_lesson.sh <workflow-run-folder>` to ask Codex, Gemini, and Claude to independently review whether the lesson has a valid trigger event, is evidence-backed, scoped correctly, actionable, and falsifiable.
 - If any reviewer objects, either revise the candidate or mark it rejected with negative confidence.
 - If all reviewers and the human approve, copy the lesson into `workflow/memory/lessons.yaml` at `confidence: 0` or promote it to `1` if the human wants it active as a low-confidence advisory.
 - Increase confidence only after a future run shows the lesson was useful, then repeat Codex, Claude, Gemini, and human review before promotion.

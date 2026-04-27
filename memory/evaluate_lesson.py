@@ -23,6 +23,15 @@ WORKFLOW_ROOT = REPO_ROOT / "workflow"
 DEFAULT_OUTPUT_CHARS = 24000
 DEFAULT_EVIDENCE_CHARS = 12000
 DEFAULT_TIMEOUT_SECONDS = 1800
+ALLOWED_REASON_CATEGORIES = (
+    "implementation_correction",
+    "review_gap",
+    "workflow_mechanism_gap",
+    "rerun_repair",
+    "stopped_run_human_rerun",
+    "human_intervention",
+    "non_obvious_constraint_discovered_by_failure",
+)
 
 
 @dataclass
@@ -201,17 +210,23 @@ def render_evidence_bundle(paths: list[tuple[Path, str]], max_chars: int) -> str
 
 
 def build_review_prompt(candidate: dict[str, Any], workspace: Path, evidence_bundle: str, agent: str) -> str:
+    allowed_categories = ", ".join(ALLOWED_REASON_CATEGORIES)
     return f"""You are reviewing a proposed workflow-level lesson for a coding/research workflow.
 
 Reviewer identity: {agent}
 
 Your job is to decide whether this lesson is evidence-backed, scoped correctly,
-actionable for future workflows, and falsifiable. Be conservative. Do not approve
-the lesson merely because it sounds plausible.
+actionable for future workflows, triggered by a concrete correction/repair/intervention
+event, and falsifiable. Be conservative. Do not approve the lesson merely because
+it sounds plausible.
 
 Review rules:
 - Treat project-specific handoff facts as unsuitable for global workflow memory.
 - Approve only lessons that can help future unrelated runs.
+- Reject or request revision if the lesson lacks an artifact-backed `trigger_event`
+  and valid `reason_category`. Allowed reason categories: {allowed_categories}.
+- Reject or request revision if the lesson comes only from a successful first-pass
+  implementation or ordinary best practice.
 - Reject or request revision if the lesson overgeneralizes from one run.
 - Reject or request revision if evidence does not directly support the claim.
 - Reject or request revision if applies_when, does_not_apply_when, required_checks,
