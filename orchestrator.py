@@ -264,6 +264,22 @@ def parse_command_template(template: str, **kwargs: str) -> list[str]:
     return shlex.split(expanded)
 
 
+def expand_step_text(value: Any, paths: WorkflowPaths) -> str:
+    text = str(value)
+    replacements = {
+        "{workspace}": str(paths.root),
+        "{repo_root}": str(paths.repo_root),
+        "{results}": str(paths.results_md),
+        "{plan}": str(paths.plan_md),
+        "{progress}": str(paths.progress_md),
+        "{task}": str(paths.task_md),
+        "{discussion}": str(paths.discussion_md),
+    }
+    for placeholder, replacement in replacements.items():
+        text = text.replace(placeholder, replacement)
+    return text
+
+
 def run_external_command(
     command: list[str],
     *,
@@ -1265,13 +1281,16 @@ def build_codex_prompt(
     step: dict[str, Any],
 ) -> str:
     verification_lines = "\n".join(
-        f"- V{index}: {item}" for index, item in enumerate(step.get("verification", []), start=1)
+        f"- V{index}: {expand_step_text(item, paths)}"
+        for index, item in enumerate(step.get("verification", []), start=1)
     ) or "- None listed"
     acceptance_lines = "\n".join(
-        f"- AC{index}: {item}" for index, item in enumerate(step.get("acceptance_criteria", []), start=1)
+        f"- AC{index}: {expand_step_text(item, paths)}"
+        for index, item in enumerate(step.get("acceptance_criteria", []), start=1)
     ) or "- None listed"
     implementation_lines = "\n".join(
-        f"- I{index}: {item}" for index, item in enumerate(step.get("implementation", []), start=1)
+        f"- I{index}: {expand_step_text(item, paths)}"
+        for index, item in enumerate(step.get("implementation", []), start=1)
     ) or "- No implementation notes provided"
     progress_text = clip_text(paths.progress_md.read_text(encoding="utf-8"), PROGRESS_PROMPT_CHARS, from_end=True)
     manifest_text = yaml.safe_dump(
@@ -1328,6 +1347,7 @@ Required behavior:
 - Use `{paths.repo_root}` as the repository working root when you run commands or edit files.
 - Treat submodule-owned areas as read-only by default, and prefer creating helper scripts or artifacts under `{paths.root}` when you need workflow-specific glue.
 - Use `{paths.root}` directly for workflow-local files in implementation and verification commands. Do not create, update, or depend on a repo-root `workflow_workspace` directory or symlink.
+- When an implementation or verification command includes `cd {paths.root} && ...`, run that command from `{paths.root}` exactly. Do not drop the `cd` or rerun the command from `{paths.repo_root}` with the same relative paths.
 - Before concluding that the host GPU, renderer, or environment is broken, compare your own execution environment against the parent workflow snapshot above. If they differ, treat that as a workflow-launch or sandbox mismatch and fix the workflow/scripts/config so future runs use the same environment as the parent workflow shell.
 - Make the necessary repository changes.
 - Ensure the acceptance criteria for this step are satisfied, or clearly record why they are not satisfied.
