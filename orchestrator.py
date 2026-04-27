@@ -148,6 +148,7 @@ LESSON_REJECTED_MIN = -5
 LESSON_REJECTED_MAX = -1
 LESSON_ACTIVE_MIN = 1
 LESSON_ACTIVE_MAX = 10
+KARPATHY_CODE_INSTRUCTIONS = Path(__file__).resolve().parent / "memory" / "karpathy-code-instructions.md"
 
 
 def ensure_workflow_files(
@@ -531,6 +532,15 @@ def render_relevant_lessons(lessons: list[dict[str, Any]]) -> str:
             lines.append("  falsification_conditions:")
             lines.extend(falsification)
     return "\n".join(lines)
+
+
+def render_executor_code_instructions() -> str:
+    if not KARPATHY_CODE_INSTRUCTIONS.exists():
+        return "No additional executor coding instructions are configured."
+    text = KARPATHY_CODE_INSTRUCTIONS.read_text(encoding="utf-8").strip()
+    if not text:
+        return "No additional executor coding instructions are configured."
+    return clip_text(text, 12000)
 
 
 def markdown_heading_present(section_text: str, heading: str) -> bool:
@@ -1271,6 +1281,7 @@ def build_codex_prompt(
     ).strip()
     parent_runtime = runtime_context(paths)
     lessons_text = render_relevant_lessons(select_relevant_lessons(paths, lesson_context_for_step(paths, step)))
+    executor_code_instructions = render_executor_code_instructions()
     return f"""Implement exactly one approved workflow step in this repository.
 
 Current step:
@@ -1303,6 +1314,12 @@ Parent workflow runtime snapshot:
 Workflow-level lessons:
 ```text
 {lessons_text}
+```
+
+Additional executor coding instructions:
+These guidelines are advisory and should shape how you work. They do not override the current step objective, acceptance criteria, verification requirements, repository instructions, explicit user instructions, or workflow safety/sandbox rules.
+```markdown
+{executor_code_instructions}
 ```
 
 Required behavior:
