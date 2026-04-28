@@ -30,6 +30,21 @@ MANIFEST_HISTORY_SAVE_ENTRIES = 40
 APPROVED_STEP_SUMMARY_CHARS = 500
 RESULTS_SUMMARY_CHARS = 400
 VALID_WORKFLOW_OUTCOME_STATUSES = {"pending", "pass", "fail", "inconclusive"}
+BLOCKING_OUTCOME_KEY = "blocks_downstream_on_fail"
+
+
+def step_blocks_downstream_on_fail(step: dict[str, Any]) -> bool:
+    explicit_gate = step.get(BLOCKING_OUTCOME_KEY)
+    if explicit_gate is not None:
+        return explicit_gate is True
+
+    step_id = str(step.get("id", "")).lower()
+    title = str(step.get("title", "")).lower()
+    objective = str(step.get("objective", "")).lower()
+    haystack = " ".join([step_id, title, objective])
+    if "smoke" in haystack and any(token in haystack for token in ("eval", "evaluation", "benchmark", "test")):
+        return True
+    return False
 
 
 def _normalize_followup_step_id(source_step_id: str) -> str:
@@ -163,6 +178,19 @@ def unresolved_outcome_issue_lines(manifest: dict[str, Any]) -> list[str]:
     return issues
 
 
+def blocked_step_issue_lines(manifest: dict[str, Any]) -> list[str]:
+    issues: list[str] = []
+    for step in manifest.get("steps", []):
+        if step.get("status") != "blocked":
+            continue
+        reason = str(step.get("blocked_reason", "")).strip()
+        issues.append(
+            f"- `{step['id']}` is blocked: "
+            f"{clip_text(reason or 'No reason recorded.', RESULTS_SUMMARY_CHARS, from_end=True)}"
+        )
+    return issues
+
+
 def render_step_summary(step: dict[str, Any]) -> list[str]:
     lines = [f"- {step_label(step)} [{step.get('status', 'pending')}]"]
     if step.get("status") == "approved":
@@ -174,6 +202,10 @@ def render_step_summary(step: dict[str, Any]) -> list[str]:
         lines.append("  Completed.")
     elif step.get("status") == "needs_changes":
         lines.append("  Needs changes before the workflow can continue.")
+    elif step.get("status") == "blocked":
+        reason = str(step.get("blocked_reason", "")).strip()
+        rendered_reason = clip_text(reason, RESULTS_SUMMARY_CHARS, from_end=True) if reason else "No reason recorded."
+        lines.append(f"  Blocked: {rendered_reason}")
     return lines
 
 
@@ -187,6 +219,13 @@ def render_step_detail(step: dict[str, Any]) -> str:
             f"### Step {step_label(step)}",
             "",
             f"- Status: `{step.get('status', 'pending')}`",
+            *(
+                [
+                    f"- Blocked reason: {str(step.get('blocked_reason', '')).strip()}",
+                ]
+                if step.get("status") == "blocked" and str(step.get("blocked_reason", "")).strip()
+                else []
+            ),
             "",
             "Objective:",
             objective,
@@ -219,7 +258,7 @@ def render_plan_document(manifest: dict[str, Any]) -> str:
     upcoming_steps = [
         step
         for step in manifest.get("steps", [])
-        if step is not active_step and step.get("status") in {"pending", "needs_changes", "in_progress", "awaiting_review"}
+        if step is not active_step and step.get("status") in {"pending", "needs_changes", "in_progress", "awaiting_review", "blocked"}
     ]
 
     sections = [
@@ -329,6 +368,7 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
         "approved",
         "needs_changes",
         "done",
+        "blocked",
     }
     workflow_outcome = manifest.get("workflow_outcome")
     if workflow_outcome is not None:
@@ -394,6 +434,14 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
         if outcome_reason is not None and not isinstance(outcome_reason, str):
             raise WorkflowError(f"Step {step_id} outcome_reason must be a string when present.")
 
+        blocks_downstream_on_fail = step.get(BLOCKING_OUTCOME_KEY)
+        if blocks_downstream_on_fail is not None and not isinstance(blocks_downstream_on_fail, bool):
+            raise WorkflowError(f"Step {step_id} {BLOCKING_OUTCOME_KEY} must be a boolean when present.")
+
+        blocked_reason = step.get("blocked_reason")
+        if blocked_reason is not None and not isinstance(blocked_reason, str):
+            raise WorkflowError(f"Step {step_id} blocked_reason must be a string when present.")
+
         implementation_summary = step.get("implementation_summary")
         if implementation_summary is not None:
             if not isinstance(implementation_summary, list) or not all(
@@ -437,6 +485,8 @@ def compact_manifest_for_storage(manifest: dict[str, Any]) -> dict[str, Any]:
             objective = str(step.get("objective", "")).strip()
             if objective:
                 step["objective"] = clip_text(objective, RESULTS_SUMMARY_CHARS)
+        if isinstance(step.get("blocked_reason"), str):
+            step["blocked_reason"] = clip_text(step["blocked_reason"], RESULTS_SUMMARY_CHARS, from_end=True)
     if isinstance(compact.get("workflow_outcome_reason"), str):
         compact["workflow_outcome_reason"] = clip_text(
             compact["workflow_outcome_reason"],
@@ -469,6 +519,39 @@ def get_active_step(manifest: dict[str, Any]) -> dict[str, Any]:
         if step.get("status") == "pending":
             return step
     raise WorkflowError("No pending or active steps remain in the plan manifest.")
+
+
+def block_pending_downstream_steps_after_gate(
+    manifest: dict[str, Any],
+    step_id: str,
+    *,
+    reason: str,
+) -> list[str]:
+    blocked: list[str] = []
+    seen_gate = False
+    for candidate in manifest.get("steps", []):
+        if candidate.get("id") == step_id:
+            seen_gate = True
+            continue
+        if not seen_gate:
+            continue
+        if candidate.get("status") != "pending":
+            continue
+
+        candidate_text = " ".join(
+            [
+                str(candidate.get("id", "")),
+                str(candidate.get("title", "")),
+                str(candidate.get("objective", "")),
+            ]
+        ).lower()
+        if not any(token in candidate_text for token in ("eval", "evaluation", "benchmark")):
+            continue
+
+        candidate["status"] = "blocked"
+        candidate["blocked_reason"] = reason
+        blocked.append(str(candidate.get("id", "")))
+    return blocked
 
 
 def mark_step_status(
@@ -607,6 +690,34 @@ def approve_step(
                 "timestamp": utc_now(),
             }
         )
+
+    if outcome_status == "fail" and step_blocks_downstream_on_fail(step):
+        gate_reason = (
+            outcome_reason.strip()
+            or review_summary.strip()
+            or f"Step '{step_id}' failed and is configured to block downstream evaluations."
+        )
+        blocked_steps = block_pending_downstream_steps_after_gate(
+            manifest,
+            step_id,
+            reason=(
+                f"Blocked because gate step '{step_id}' produced outcome_status=fail. "
+                f"Resolve or replan a remediation before running this downstream evaluation. "
+                f"Failure signal: {clip_text(gate_reason, RESULTS_SUMMARY_CHARS, from_end=True)}"
+            ),
+        )
+        if blocked_steps:
+            manifest.setdefault("history", []).append(
+                {
+                    "step_id": step_id,
+                    "event": "downstream_steps_blocked",
+                    "details": (
+                        "Blocked pending downstream evaluation/benchmark steps after failed gate: "
+                        + ", ".join(blocked_steps)
+                    ),
+                    "timestamp": utc_now(),
+                }
+            )
 
     next_step_id = None
     for candidate in manifest["steps"]:
@@ -771,6 +882,7 @@ def build_manifest_progress(
     open_issues.extend(
         issue for issue in unresolved_outcome_issue_lines(manifest) if issue not in open_issues
     )
+    open_issues.extend(issue for issue in blocked_step_issue_lines(manifest) if issue not in open_issues)
     if not open_issues:
         open_issues.append("- None recorded.")
 
@@ -891,12 +1003,13 @@ def build_workflow_summary(
             )
 
     remaining_issues.extend(unresolved_outcome_issue_lines(manifest))
+    remaining_issues.extend(blocked_step_issue_lines(manifest))
 
     for step in manifest.get("steps", []):
         status = step.get("status")
         if status == "approved":
             continue
-        if status in {"pending", "needs_changes", "in_progress", "awaiting_review"}:
+        if status in {"pending", "needs_changes", "in_progress", "awaiting_review", "blocked"}:
             remaining_issues.append(
                 f"- `{step['id']}` ({step['title']}) is still `{status}`."
             )

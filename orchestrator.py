@@ -1045,6 +1045,8 @@ Requirements:
 - If the latest review rejected a step but did not require human intervention, update the plan so the next loop iteration attempts a concrete fix instead of repeating the same failed action blindly.
 - Preserve already approved steps unless the evidence shows they are invalid.
 - If remediation requires debugging the workflow itself, add explicit repair or diagnostic steps rather than treating the issue as a permanent external blocker.
+- For expensive benchmark or evaluation workflows, add a cheap readiness gate before the full run whenever possible. Set `blocks_downstream_on_fail: true` on smoke tests, replay audits, or one-episode validations that should prevent later full evaluation steps after a failed outcome.
+- Before a full evaluation, include concrete domain-appropriate readiness checks that prove the inputs, environment, and measured artifact match the benchmark command. For policy-learning tasks, this includes expert replay from stored initial states, restored observations/agent_pos matching processed samples, explicit checkpoint/data path validation, and teacher-forced action error low enough to justify closed-loop evaluation.
 - Prefer workflow-owned helper scripts and artifacts under the actual workflow root `{paths.root}` when automation glue is needed.
 - Use the exact workflow root `{paths.root}` in all implementation and verification paths. Do not invent, create, symlink, or reference a repo-root `workflow_workspace` alias.
 - If a failure is caused by missing public checkpoints, datasets, assets, or packages and the repository already documents or scripts how to acquire them, treat that as workflow work. Add an explicit prerequisite-staging or cache-population step instead of immediately requiring human intervention.
@@ -1361,6 +1363,7 @@ Required behavior:
 - Make the necessary repository changes.
 - Ensure the acceptance criteria for this step are satisfied, or clearly record why they are not satisfied.
 - Run the verification listed for this step.
+- When a script, diagnostic, evaluator, or training command accepts an explicit artifact path from an argument or config, validate that the explicit path exists before using it. Do not silently fall back to an older default artifact when an explicit path was requested; raise or record a clear failure instead.
 - Do not finish your executor run while a command required for this step is still running in the background. Wait for it to finish, inspect its exit status and logs, then complete verification.
 - Do not append the required step section until the step is actually complete or you have confirmed and documented a terminal blocker. A progress update like "training is still running" is not a valid completion of the executor contract.
 - If the first attempt fails but the failure appears fixable from this repository, repair the issue and rerun verification within the same step instead of stopping at the first error.
@@ -1377,6 +1380,7 @@ Required behavior:
 - Do not write the step result section until required commands/checks have finished and the evidence above is complete.
 - If a required verification is skipped, still record it under `### Verification Evidence` with `fail` or `inconclusive` and a concrete blocker; do not present skipped or still-running work as complete.
 - Do not modify step statuses in `{paths.plan_md}`.
+- If this is a smoke test, replay audit, one-episode validation, or other gate before an expensive benchmark, record whether downstream evaluation should remain blocked until a remediation/replan is completed.
 - Do not continue to the next step.
 
 Current workflow progress:
@@ -1484,9 +1488,11 @@ Reject if the latest step result section is missing any of these subsections: `#
 Reject if any acceptance criterion or verification requirement lacks specific evidence in the latest step result section.
 Reject if command-based verification lacks an exit/return code, unless the result section explains why no command was applicable for that requirement.
 Reject if required verification is described as still running, skipped, not tested, or to be verified later.
+Reject if the step relies on an explicitly requested checkpoint, dataset, log, or other artifact path but the result section does not show that the explicit path was validated or used, or if the implementation silently falls back to a default artifact after an explicit path is missing.
 Set `outcome_status` to `pass` when the step completed and achieved its intended outcome, `fail` when the step executed but the measured outcome is unacceptable, and `inconclusive` when the step completed but the result cannot yet be judged confidently.
 If any acceptance criterion is unmet, do not use `outcome_status=pass`; either reject the step or approve it with `outcome_status=fail` / `inconclusive` so follow-up work remains visible.
 Use `approved=true` with `outcome_status=fail` when the workflow should continue but the poor result must remain visible as a follow-on issue instead of blocking step completion.
+For smoke tests, replay audits, one-episode validations, or other pre-benchmark gates, treat a failed measured outcome as a downstream blocker unless the result section proves why running the full evaluation is still informative. Prefer replanning a remediation or diagnostic over spending compute on a known-failing full benchmark.
 Set `human_intervention_required` to `true` only when the blocker clearly requires operator action outside the repository, such as missing permissions, credentials, unavailable external services, or unavailable hardware/resource allocation that the workflow cannot repair itself.
 Set `human_intervention_required` to `false` for workflow bugs, stale assumptions, launcher/sandbox mismatches, missing retries, weak diagnostics, bad scripts, or other issues that a replanned repository change could fix in a later loop iteration.
 Set `human_intervention_required` to `false` when the failure is a missing public checkpoint, dataset, asset bundle, or package that can be fetched or materialized by adding repository-local automation, even if the first attempt did not yet include that automation.

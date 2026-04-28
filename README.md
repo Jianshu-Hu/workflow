@@ -186,6 +186,21 @@ The section must be headed `## Step <id> - <title>` and must include these exact
 If the evidence is missing, vague, still running, skipped, not tested, or lacks command exit codes for command-based checks, the step remains `needs_changes`.
 The workflow writes an evidence contract report under `artifacts/command_failures/` so the same step can be resumed with the missing proof.
 
+When a step uses an explicit checkpoint, dataset, log, or other artifact path, the executor must validate that exact path and must not silently fall back to an older default artifact. Review should reject evidence that relies on an explicit artifact path without proving which artifact was used.
+
+## Evaluation Readiness Gates
+
+Expensive evaluations should be protected by a cheap gate whenever the workflow can run one. For policy-learning tasks, this usually means a replay audit, one-episode validation, or 1-5 episode smoke test before a full benchmark. Add `blocks_downstream_on_fail: true` to any manifest step whose failed measured outcome should prevent later evaluation or benchmark steps from running.
+
+Before launching a full policy evaluation, the plan should include evidence for the relevant items below:
+
+- Explicit checkpoint, dataset, zarr, config, and log paths exist and are the exact artifacts used by the command.
+- Expert action replay succeeds from stored initial states in the same evaluation environment.
+- Restored observations, point clouds, `agent_pos`, camera/extrinsic handling, and action dimensions match the processed training samples.
+- Teacher-forced policy predictions on validation/demo observations have low per-action-dimension error, with gripper/base/control-mode groups inspected separately.
+- A smallest-useful closed-loop validation has nonzero success or otherwise shows a new behavior worth evaluating at larger scale.
+- If a smoke or replay gate fails, replan a remediation/diagnostic before running the full benchmark.
+
 ## Workflow-Level Lessons
 
 Curated cross-run lessons live in `workflow/memory/lessons.yaml`.
@@ -268,6 +283,8 @@ When a step is approved with `outcome_status=fail`, the workflow automatically i
 That keeps failed benchmark results visible as explicit workflow work instead of burying them only in `results.md`.
 Automatically generated follow-up steps do not recursively create more follow-ups when they are approved with `outcome_status=fail`.
 If the investigation documents that no workflow-side remediation remains, the workflow can finish as `done` while the objective outcome remains `fail`.
+
+Failed gate steps can also block downstream work. Set `blocks_downstream_on_fail: true` on an explicit gate step, or rely on the built-in smoke-evaluation heuristic for steps whose id/title/objective contain smoke plus evaluation/benchmark/test language. When such a step is approved with `outcome_status=fail`, pending downstream evaluation or benchmark steps are marked `blocked` with the failure reason. The planner must then add or choose a remediation step before another full evaluation can run.
 
 Workflow completion and objective achievement are tracked separately:
 
