@@ -264,6 +264,8 @@ This is useful for benchmarks and evaluations where the run completed, but the m
 
 When a step is approved with `outcome_status=fail`, the workflow automatically inserts a follow-up investigation step if one does not already exist.
 That keeps failed benchmark results visible as explicit workflow work instead of burying them only in `results.md`.
+Automatically generated follow-up steps do not recursively create more follow-ups when they are approved with `outcome_status=fail`.
+If the investigation documents that no workflow-side remediation remains, the workflow can finish as `done` while the objective outcome remains `fail`.
 
 Workflow completion and objective achievement are tracked separately:
 

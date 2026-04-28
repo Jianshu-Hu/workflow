@@ -36,6 +36,10 @@ def _normalize_followup_step_id(source_step_id: str) -> str:
     return f"followup-{source_step_id}"
 
 
+def is_auto_followup_step_id(step_id: str) -> bool:
+    return step_id.startswith("followup-")
+
+
 def _default_followup_title(step: dict[str, Any]) -> str:
     return f"Investigate failed outcome for {step['title']}"
 
@@ -543,7 +547,8 @@ def approve_step(
         }
     )
 
-    if outcome_status == "fail":
+    should_add_followup = outcome_status == "fail" and not is_auto_followup_step_id(step_id)
+    if should_add_followup:
         followup_step_id = _normalize_followup_step_id(step_id)
         existing_followup = next(
             (
@@ -589,6 +594,19 @@ def approve_step(
                     "timestamp": utc_now(),
                 }
             )
+    elif outcome_status == "fail" and is_auto_followup_step_id(step_id):
+        manifest.setdefault("history", []).append(
+            {
+                "step_id": step_id,
+                "event": "followup_chain_stopped",
+                "details": (
+                    "Approved failed outcome on an automatically generated follow-up step; "
+                    "not adding another nested follow-up. The unresolved objective failure "
+                    "will remain visible in workflow_outcome and summary.md."
+                ),
+                "timestamp": utc_now(),
+            }
+        )
 
     next_step_id = None
     for candidate in manifest["steps"]:
