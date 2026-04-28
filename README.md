@@ -284,7 +284,7 @@ That keeps failed benchmark results visible as explicit workflow work instead of
 Automatically generated follow-up steps do not recursively create more follow-ups when they are approved with `outcome_status=fail`.
 If the investigation documents that no workflow-side remediation remains, the workflow can finish as `done` while the objective outcome remains `fail`.
 
-Failed gate steps can also block downstream work. Set `blocks_downstream_on_fail: true` on an explicit gate step, or rely on the built-in smoke-evaluation heuristic for steps whose id/title/objective contain smoke plus evaluation/benchmark/test language. When such a step is approved with `outcome_status=fail`, pending downstream evaluation or benchmark steps are marked `blocked` with the failure reason. The planner must then add or choose a remediation step before another full evaluation can run.
+Failed gate steps can also block downstream work. Set `blocks_downstream_on_fail: true` on an explicit gate step, or rely on the built-in smoke-evaluation heuristic for steps whose id/title/objective contain smoke plus evaluation/benchmark/test language. When such a step is approved with `outcome_status=fail`, pending downstream evaluation or benchmark steps are marked `blocked` with the failure reason. Automatically generated follow-up investigation steps remain runnable even if their objective mentions evaluation artifacts. The planner must then add or choose a remediation step before another full evaluation can run.
 
 Workflow completion and objective achievement are tracked separately:
 

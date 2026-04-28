@@ -538,9 +538,15 @@ def block_pending_downstream_steps_after_gate(
         if candidate.get("status") != "pending":
             continue
 
+        candidate_id = str(candidate.get("id", ""))
+        # Failed gates should block expensive downstream runs, not the
+        # investigation/remediation step that explains or fixes the failure.
+        if is_auto_followup_step_id(candidate_id):
+            continue
+
         candidate_text = " ".join(
             [
-                str(candidate.get("id", "")),
+                candidate_id,
                 str(candidate.get("title", "")),
                 str(candidate.get("objective", "")),
             ]
@@ -550,7 +556,7 @@ def block_pending_downstream_steps_after_gate(
 
         candidate["status"] = "blocked"
         candidate["blocked_reason"] = reason
-        blocked.append(str(candidate.get("id", "")))
+        blocked.append(candidate_id)
     return blocked
 
 
