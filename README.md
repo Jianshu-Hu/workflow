@@ -125,7 +125,8 @@ python workflow/orchestrator.py \
   --workspace workflow_runs/my-task-rerun \
   --config workflow/configs/config.gemini.example.yaml \
   migrate \
-  --from-workspace workflow_runs/my-task
+  --from-workspace workflow_runs/my-task \
+  --task-summary "New destination objective"
 ```
 
 In-place example:
@@ -154,6 +155,7 @@ What `migrate` does:
 - Creates a new destination workspace and refuses to overwrite an existing workflow state.
 - With `--in-place`, refreshes workflow state inside the same workspace instead of creating a new one. Existing workflow-state files are snapshotted first, and run-local payload stays in place.
 - Copies the durable task and discussion context from the source workspace.
+- If `--task-summary` is provided, records it as the new destination objective while keeping the source task as imported context.
 - Writes `migration.md` in the destination with a summarized handoff: completed work, latest review, open issues, unfinished step, and the next action from the source workflow.
 - Resets the destination workspace to fresh `planning` status so the next `plan` or `loop` run can continue from the imported handoff instead of pretending work already ran there.
 - Copies `runtime.env` from the source workspace by default so planner/reviewer model choices follow the migration. Pass `--skip-runtime-env` to opt out.

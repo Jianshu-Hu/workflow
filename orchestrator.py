@@ -2516,6 +2516,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="Do not copy runtime.env from the source workspace into the new workspace.",
     )
     migrate_parser.add_argument(
+        "--task-summary",
+        default="",
+        help="New destination task summary. The source task is kept as imported context.",
+    )
+    migrate_parser.add_argument(
         "--in-place",
         action="store_true",
         help="Refresh workflow state inside the same workspace instead of creating a new one. Run-local payload stays in place and prior workflow-state files are snapshotted.",
@@ -2563,6 +2568,7 @@ def main(argv: list[str] | None = None) -> int:
                     source_paths=source_paths,
                     copy_runtime_env=not args.skip_migrate_runtime_env,
                     ensure_workflow_files_fn=ensure_workflow_files,
+                    task_summary_override=args.task_summary,
                 )
                 task_md_already_exists = True
                 migrated_during_init = True
@@ -2621,6 +2627,7 @@ def main(argv: list[str] | None = None) -> int:
                 source_paths=source_paths,
                 copy_runtime_env=not args.skip_runtime_env,
                 ensure_workflow_files_fn=ensure_workflow_files,
+                task_summary_override=args.task_summary,
                 in_place=args.in_place,
             )
             print(f"Migrated workflow workspace to {paths.root}")

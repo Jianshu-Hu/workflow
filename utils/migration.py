@@ -181,6 +181,30 @@ def append_import_note(markdown_text: str, *, source_root: Path, imported_at: st
     return "\n".join([base, *note_lines]).rstrip() + "\n"
 
 
+def prepend_new_workflow_objective(markdown_text: str, task_summary: str) -> str:
+    summary = task_summary.strip()
+    if not summary:
+        return markdown_text
+
+    body = markdown_text.rstrip()
+    heading = "# Task"
+    if body.startswith("# Task"):
+        body = body[len("# Task") :].lstrip("\n")
+    objective = "\n".join(
+        [
+            heading,
+            "",
+            "## New Workflow Objective",
+            "",
+            summary,
+            "",
+            "## Imported Source Task",
+            "",
+        ]
+    )
+    return objective + body + "\n"
+
+
 def load_source_manifest(paths: WorkflowPaths) -> tuple[dict[str, Any], str | None]:
     if not paths.plan_md.exists():
         return create_default_manifest(), f"Missing source plan file: {paths.plan_md}"
@@ -419,8 +443,14 @@ def rewrite_workspace_paths_in_copied_files(
     return rewritten_files
 
 
-def build_migrated_manifest(source_manifest: dict[str, Any], *, imported_at: str) -> dict[str, Any]:
-    manifest = create_default_manifest(str(source_manifest.get("task", "")))
+def build_migrated_manifest(
+    source_manifest: dict[str, Any],
+    *,
+    imported_at: str,
+    task_summary_override: str = "",
+) -> dict[str, Any]:
+    task_summary = task_summary_override.strip() or str(source_manifest.get("task", ""))
+    manifest = create_default_manifest(task_summary)
     source_steps = source_manifest.get("steps", [])
     if not isinstance(source_steps, list):
         source_steps = []
@@ -530,6 +560,7 @@ def run_migration(
     source_paths: WorkflowPaths,
     copy_runtime_env: bool,
     ensure_workflow_files_fn: Callable[..., None],
+    task_summary_override: str = "",
     in_place: bool = False,
 ) -> None:
     same_workspace = dest_paths.root == source_paths.root
@@ -554,7 +585,9 @@ def run_migration(
     source_manifest, source_manifest_error = load_source_manifest(source_paths)
     source_task_text = read_optional_text(source_paths.task_md)
     source_discussion_text = read_optional_text(source_paths.discussion_md)
-    task_summary = extract_task_summary(source_task_text, str(source_manifest.get("task", "")))
+    task_summary = task_summary_override.strip() or extract_task_summary(
+        source_task_text, str(source_manifest.get("task", ""))
+    )
     imported_at = utc_now()
 
     if in_place:
@@ -572,7 +605,11 @@ def run_migration(
             workspace_root=dest_paths.root,
         )
 
-    migrated_manifest = build_migrated_manifest(source_manifest, imported_at=imported_at)
+    migrated_manifest = build_migrated_manifest(
+        source_manifest,
+        imported_at=imported_at,
+        task_summary_override=task_summary_override,
+    )
     migrated_manifest = rewrite_legacy_workspace_alias_in_value(
         migrated_manifest,
         workspace_root=dest_paths.root,
@@ -581,7 +618,13 @@ def run_migration(
 
     dest_paths.task_md.write_text(
         append_import_note(
-            source_task_text or render_task_template(task_summary),
+            prepend_new_workflow_objective(
+                source_task_text
+                or render_task_template(
+                    extract_task_summary(source_task_text, str(source_manifest.get("task", "")))
+                ),
+                task_summary_override,
+            ),
             source_root=source_paths.root,
             imported_at=imported_at,
             note_heading="Imported Workflow Context",
