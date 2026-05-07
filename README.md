@@ -183,7 +183,8 @@ The section must be headed `## Step <id> - <title>` and must include these exact
 - `### Changed Files`: every changed file and why it changed, or an explicit statement that no files changed.
 - `### Outcome`: `pass`, `fail`, or `inconclusive`, plus remaining risks.
 
-If the evidence is missing, vague, still running, skipped, not tested, or lacks command exit codes for command-based checks, the step remains `needs_changes`.
+If the evidence is missing, vague, still running, to be verified later, or lacks command exit codes for command-based checks, the step remains `needs_changes`.
+Evidence may state that a check was gated off, blocked, or not applicable only when it records a terminal `fail` or `inconclusive` decision with concrete artifact or command evidence for that gate.
 The workflow writes an evidence contract report under `artifacts/command_failures/` so the same step can be resumed with the missing proof.
 
 When a step uses an explicit checkpoint, dataset, log, or other artifact path, the executor must validate that exact path and must not silently fall back to an older default artifact. Review should reject evidence that relies on an explicit artifact path without proving which artifact was used.

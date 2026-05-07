@@ -135,12 +135,43 @@ EVIDENCE_MATCH_STOPWORDS = {
 INCOMPLETE_EVIDENCE_PATTERNS = (
     r"\bstill\s+running\b",
     r"\bin\s+progress\b",
-    r"\bnot\s+run\b",
-    r"\bnot\s+tested\b",
-    r"\buntested\b",
-    r"\bskipped\b",
     r"\bto\s+be\s+verified\b",
     r"\bneeds?\s+verification\b",
+)
+CONDITIONAL_INCOMPLETE_EVIDENCE_PATTERNS = (
+    r"\bnot\s+run\b",
+    r"\bnot\s+tested\b",
+    r"\bnot\s+applicable\b",
+    r"\buntested\b",
+    r"\bskipped\b",
+    r"(?<![A-Za-z0-9])n\s*/\s*a(?![A-Za-z0-9])",
+)
+EVIDENCE_STATUS_PATTERN = (
+    r"\b(?:AC|V)\s*\d+\s*[:=-]?\s*(?:fail|inconclusive)\b|"
+    r"\b(?:fail|inconclusive)\s*:"
+)
+COMMAND_EXIT_CODE_PATTERN = (
+    r"\b(?:exit|return)\s*(?:code)?\s*[:=]\s*-?[0-9]+\b|"
+    r"\b(?:exit|return)\s+code\b|"
+    r"\bexited?\s+[0-9]+\b"
+)
+TERMINAL_GATE_EVIDENCE_PATTERNS = (
+    r"\bgate(?:d|s)?\b",
+    r"\bblocked\b",
+    r"\bblocker\b",
+    r"\bterminal\b",
+    r"\bnot\s+applicable\b",
+    r"(?<![A-Za-z0-9])n\s*/\s*a(?![A-Za-z0-9])",
+)
+CONCRETE_COMPLETION_EVIDENCE_PATTERNS = (
+    COMMAND_EXIT_CODE_PATTERN,
+    r"\bcommand/check\b",
+    r"\breports?\b",
+    r"\brecorded\b",
+    r"\bartifacts?\b",
+    r"\b[A-Za-z0-9_.-]+\.(?:json|md|log|txt|csv|ckpt|zarr|hdf5)\b",
+    r"/(?!\s*a\b)[A-Za-z0-9_./=-]+",
+    r"\b[A-Za-z0-9_.-]+\s*=\s*(?:false|true)\b",
 )
 LESSON_CONTEXT_CHARS = 24000
 MAX_RELEVANT_LESSONS = 5
@@ -645,6 +676,56 @@ def evidence_maps_item(section_text: str, item: Any, *, prefix: str, index: int)
     return evidence_reference_present(section_text, prefix, index) or section_mentions_item(section_text, item)
 
 
+def evidence_statement_chunks(text: str) -> list[str]:
+    chunks: list[str] = []
+    current: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            if current:
+                chunks.append(" ".join(current))
+                current = []
+            continue
+        if re.match(r"^(?:[-*+]|\d+[.)])\s+", stripped) and current:
+            chunks.append(" ".join(current))
+            current = []
+        current.append(stripped)
+    if current:
+        chunks.append(" ".join(current))
+    return chunks
+
+
+def evidence_has_terminal_gate_context(statement: str) -> bool:
+    has_status = bool(re.search(EVIDENCE_STATUS_PATTERN, statement, re.IGNORECASE))
+    has_gate_or_blocker = any(
+        re.search(pattern, statement, re.IGNORECASE)
+        for pattern in TERMINAL_GATE_EVIDENCE_PATTERNS
+    )
+    has_concrete_evidence = any(
+        re.search(pattern, statement, re.IGNORECASE)
+        for pattern in CONCRETE_COMPLETION_EVIDENCE_PATTERNS
+    )
+    return has_status and has_gate_or_blocker and has_concrete_evidence
+
+
+def incomplete_evidence_language_issues(text: str) -> list[str]:
+    issues: list[str] = []
+    for statement in evidence_statement_chunks(text):
+        if any(re.search(pattern, statement, re.IGNORECASE) for pattern in INCOMPLETE_EVIDENCE_PATTERNS):
+            issues.append(
+                "Evidence contains incomplete-verification language such as still running or to be verified."
+            )
+            continue
+        if any(
+            re.search(pattern, statement, re.IGNORECASE)
+            for pattern in CONDITIONAL_INCOMPLETE_EVIDENCE_PATTERNS
+        ) and not evidence_has_terminal_gate_context(statement):
+            issues.append(
+                "Evidence contains incomplete-verification language such as skipped, not run, not applicable, or not tested without a terminal gate/blocker decision and concrete evidence."
+            )
+    return issues
+
+
 def validate_executor_evidence(section_text: str, step: dict[str, Any]) -> list[str]:
     issues: list[str] = []
     for heading in EXECUTOR_REQUIRED_EVIDENCE_HEADINGS:
@@ -680,11 +761,7 @@ def validate_executor_evidence(section_text: str, step: dict[str, Any]) -> list[
                 f"{check}"
             )
 
-    if re.search(
-        r"\b(?:exit|return)\s*(?:code)?\s*[:=]\s*-?[0-9]+\b|\b(?:exit|return)\s+code\b|\bexited?\s+[0-9]+\b",
-        verification_section,
-        re.IGNORECASE,
-    ):
+    if re.search(COMMAND_EXIT_CODE_PATTERN, verification_section, re.IGNORECASE):
         pass
     elif re.search(
         r"\b(?:python|pytest|npm|yarn|pnpm|uv|cargo|go|bash|sh|make|cmake)\b",
@@ -695,12 +772,9 @@ def validate_executor_evidence(section_text: str, step: dict[str, Any]) -> list[
         )
 
     combined_evidence = "\n".join([acceptance_section, verification_section, outcome_section])
-    for pattern in INCOMPLETE_EVIDENCE_PATTERNS:
-        if re.search(pattern, combined_evidence, re.IGNORECASE):
-            issues.append(
-                "Evidence contains incomplete-verification language such as still running, skipped, or not tested."
-            )
-            break
+    language_issues = incomplete_evidence_language_issues(combined_evidence)
+    if language_issues:
+        issues.append(language_issues[0])
 
     return issues
 
@@ -1378,7 +1452,7 @@ Required behavior:
   - `### Changed Files`: list every changed file and why it changed, or state that no files changed.
   - `### Outcome`: state `pass`, `fail`, or `inconclusive`, with remaining risks.
 - Do not write the step result section until required commands/checks have finished and the evidence above is complete.
-- If a required verification is skipped, still record it under `### Verification Evidence` with `fail` or `inconclusive` and a concrete blocker; do not present skipped or still-running work as complete.
+- If a required verification is gated off, blocked, or not applicable, still record it under `### Verification Evidence` with `fail` or `inconclusive`, the terminal gate/blocker decision, and concrete artifact or command evidence for that decision; do not present unfinished or still-running work as complete.
 - Do not modify step statuses in `{paths.plan_md}`.
 - If this is a smoke test, replay audit, one-episode validation, or other gate before an expensive benchmark, record whether downstream evaluation should remain blocked until a remediation/replan is completed.
 - Do not continue to the next step.
