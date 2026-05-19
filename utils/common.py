@@ -61,7 +61,14 @@ class WorkflowPaths:
 
     @property
     def repo_root(self) -> Path:
+        configured = os.environ.get("WORKFLOW_REPO_ROOT")
+        if configured:
+            return Path(configured).expanduser().resolve()
         return Path(__file__).resolve().parents[2]
+
+    @property
+    def workflow_root(self) -> Path:
+        return Path(__file__).resolve().parents[1]
 
     @property
     def task_md(self) -> Path:
@@ -129,7 +136,7 @@ class WorkflowPaths:
 
     @property
     def global_lessons_yaml(self) -> Path:
-        return self.repo_root / "workflow" / "memory" / "lessons.yaml"
+        return self.workflow_root / "memory" / "lessons.yaml"
 
 
 @dataclasses.dataclass

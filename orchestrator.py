@@ -300,6 +300,7 @@ def refresh_placeholder_workspace(
 def parse_command_template(template: str, **kwargs: str) -> list[str]:
     if not template.strip():
         raise WorkflowError("Command template is empty.")
+    kwargs.setdefault("workflow_root", str(Path(__file__).resolve().parent))
     expanded = template.format(**kwargs)
     return shlex.split(expanded)
 
@@ -309,6 +310,7 @@ def expand_step_text(value: Any, paths: WorkflowPaths) -> str:
     replacements = {
         "{workspace}": str(paths.root),
         "{repo_root}": str(paths.repo_root),
+        "{workflow_root}": str(paths.workflow_root),
         "{results}": str(paths.results_md),
         "{plan}": str(paths.plan_md),
         "{progress}": str(paths.progress_md),
