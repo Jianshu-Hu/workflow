@@ -18,8 +18,8 @@ except ImportError:  # pragma: no cover - exercised only in minimal environments
     yaml = None
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-WORKFLOW_ROOT = REPO_ROOT / "workflow"
+REPO_ROOT = Path(os.environ.get("WORKFLOW_REPO_ROOT", Path(__file__).resolve().parents[2])).expanduser().resolve()
+WORKFLOW_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUTPUT_CHARS = 24000
 DEFAULT_EVIDENCE_CHARS = 12000
 DEFAULT_TIMEOUT_SECONDS = 1800
@@ -235,6 +235,10 @@ Review rules:
 - Use confidence 1 only for a low-confidence active advisory after approval.
 - Use negative confidence for rejected lessons.
 - Do not edit files. Review only the candidate and evidence below.
+- Return parseable YAML only, with no markdown fence or explanatory prose.
+- Do not put partial quoted phrases inside YAML list items. If a list item mentions
+  a quoted phrase, quote the entire list item or rewrite it without quotation marks.
+- Prefer `>` block scalars for long rationale text instead of long single-line strings.
 
 Return YAML only with this schema:
 
@@ -392,16 +396,33 @@ def parse_review_output(raw_output: str) -> tuple[dict[str, Any] | None, str]:
     text = raw_output.strip()
     if not text:
         return None, "empty output"
-    fence = re.search(r"```(?:yaml|yml)?\s*(.*?)```", text, re.DOTALL | re.IGNORECASE)
-    if fence:
-        text = fence.group(1).strip()
-    try:
-        parsed = yaml.safe_load(text)
-    except Exception as exc:  # noqa: BLE001 - preserve parse error text for human review.
-        return None, str(exc)
-    if not isinstance(parsed, dict):
-        return None, "parsed output is not a mapping"
-    return parsed, ""
+
+    candidates = [text]
+    candidates.extend(
+        match.group(1).strip()
+        for match in re.finditer(r"```(?:yaml|yml)?\s*(.*?)```", text, re.DOTALL | re.IGNORECASE)
+    )
+
+    first_key = re.search(r"(?m)^reviewer\s*:", text)
+    if first_key:
+        candidates.append(text[first_key.start() :].strip())
+
+    errors: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            parsed = yaml.safe_load(candidate)
+        except Exception as exc:  # noqa: BLE001 - preserve parse error text for human review.
+            errors.append(str(exc))
+            continue
+        if isinstance(parsed, dict):
+            return parsed, ""
+        errors.append("parsed output is not a mapping")
+
+    return None, errors[0] if errors else "no parseable YAML mapping found"
 
 
 def render_summary_report(

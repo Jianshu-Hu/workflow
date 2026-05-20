@@ -103,6 +103,10 @@ Review rules:
 - Keep confidence at 0 unless the lesson should actively influence future runs.
 - Use confidence 1 only for a low-confidence active advisory after approval.
 - Use negative confidence for rejected lessons.
+- Return parseable YAML only, with no markdown fence or explanatory prose.
+- Do not put partial quoted phrases inside YAML list items. If a list item mentions
+  a quoted phrase, quote the entire list item or rewrite it without quotation marks.
+- Prefer `>` block scalars for long rationale text instead of long single-line strings.
 
 Return YAML only with this schema:
 
