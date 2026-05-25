@@ -1,0 +1,503 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Planner, Codex Execute Workflow</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f7f7f4;
+      --surface: #ffffff;
+      --surface-soft: #f0f4f1;
+      --ink: #202426;
+      --muted: #5e6968;
+      --line: #d9dfdc;
+      --accent: #176b73;
+      --accent-strong: #0b5056;
+      --code-bg: #182023;
+      --code-ink: #edf7f4;
+      --shadow: 0 16px 40px rgba(30, 42, 43, 0.09);
+      font-family:
+        Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+        "Segoe UI", sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      line-height: 1.58;
+    }
+
+    a {
+      color: var(--accent-strong);
+      text-decoration-thickness: 1px;
+      text-underline-offset: 3px;
+    }
+
+    code,
+    pre {
+      font-family:
+        "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    }
+
+    code {
+      padding: 0.12rem 0.28rem;
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      background: var(--surface-soft);
+      font-size: 0.92em;
+    }
+
+    pre {
+      margin: 1rem 0 0;
+      padding: 1rem;
+      overflow-x: auto;
+      border-radius: 8px;
+      background: var(--code-bg);
+      color: var(--code-ink);
+      font-size: 0.88rem;
+      line-height: 1.5;
+    }
+
+    pre code {
+      padding: 0;
+      border: 0;
+      background: transparent;
+      color: inherit;
+      font-size: inherit;
+    }
+
+    .page {
+      width: min(1180px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 32px 0 56px;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 240px minmax(0, 1fr);
+      gap: 32px;
+      align-items: start;
+    }
+
+    .hero {
+      padding: 34px 0 24px;
+      border-bottom: 1px solid var(--line);
+      margin-bottom: 28px;
+    }
+
+    .eyebrow {
+      margin: 0 0 10px;
+      color: var(--accent);
+      font-size: 0.78rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      max-width: 900px;
+      margin: 0;
+      font-size: clamp(2rem, 5vw, 4rem);
+      line-height: 1.02;
+      letter-spacing: 0;
+    }
+
+    .lead {
+      max-width: 780px;
+      margin: 18px 0 0;
+      color: var(--muted);
+      font-size: 1.08rem;
+    }
+
+    .nav {
+      position: sticky;
+      top: 16px;
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.82);
+      box-shadow: var(--shadow);
+    }
+
+    .nav h2 {
+      margin: 0 0 12px;
+      font-size: 0.86rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+    }
+
+    .nav a {
+      display: block;
+      padding: 7px 0;
+      color: var(--ink);
+      text-decoration: none;
+      font-size: 0.94rem;
+    }
+
+    .nav a:hover {
+      color: var(--accent-strong);
+    }
+
+    main {
+      min-width: 0;
+    }
+
+    section {
+      margin-bottom: 36px;
+    }
+
+    h2 {
+      margin: 0 0 12px;
+      font-size: 1.55rem;
+      line-height: 1.2;
+      letter-spacing: 0;
+    }
+
+    h3 {
+      margin: 24px 0 8px;
+      font-size: 1.06rem;
+      letter-spacing: 0;
+    }
+
+    p {
+      margin: 0 0 12px;
+    }
+
+    ul,
+    ol {
+      margin: 0 0 14px;
+      padding-left: 1.35rem;
+    }
+
+    li {
+      margin: 0.35rem 0;
+    }
+
+    .command-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 16px;
+      margin-top: 16px;
+    }
+
+    .command-card,
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+      box-shadow: var(--shadow);
+    }
+
+    .command-card {
+      padding: 18px;
+    }
+
+    .command-card strong {
+      display: block;
+      margin-bottom: 8px;
+      font-size: 1rem;
+    }
+
+    .command-card p {
+      color: var(--muted);
+      font-size: 0.94rem;
+    }
+
+    .panel {
+      padding: 22px;
+    }
+
+    .note {
+      padding: 14px 16px;
+      border-left: 4px solid var(--accent);
+      border-radius: 6px;
+      background: var(--surface-soft);
+      color: var(--muted);
+    }
+
+    .file-list {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px 18px;
+      padding-left: 0;
+      list-style: none;
+    }
+
+    .file-list li {
+      margin: 0;
+      padding: 10px 0;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .file-list code {
+      display: inline-block;
+      margin-right: 0.25rem;
+    }
+
+    .details-list {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      padding-left: 0;
+      list-style: none;
+    }
+
+    .details-list li {
+      margin: 0;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+    }
+
+    .details-list a {
+      display: block;
+      margin-bottom: 4px;
+      font-weight: 700;
+    }
+
+    .details-list span {
+      color: var(--muted);
+      font-size: 0.94rem;
+    }
+
+    @media (max-width: 900px) {
+      .layout {
+        grid-template-columns: 1fr;
+      }
+
+      .nav {
+        position: static;
+      }
+
+      .command-grid,
+      .file-list,
+      .details-list {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <header class="hero">
+      <p class="eyebrow">Workflow Runner</p>
+      <h1>Planner, Codex Execute Workflow</h1>
+      <p class="lead">
+        A planner / executor / reviewer loop that keeps durable state in a
+        workspace directory and lets you start, migrate, or continue workflow
+        runs with a small set of commands.
+      </p>
+    </header>
+
+    <div class="layout">
+      <aside class="nav" aria-label="Page navigation">
+        <h2>Contents</h2>
+        <a href="#overview">Overview</a>
+        <a href="#daily-commands">Daily Commands</a>
+        <a href="#start">Start With Discussion</a>
+        <a href="#migrate">Continue From Existing Run</a>
+        <a href="#loop">Run The Loop</a>
+        <a href="#workspace-files">Workspace Files</a>
+        <a href="#other-commands">Other Commands</a>
+        <a href="#more-detail">More Detail</a>
+      </aside>
+
+      <main>
+        <section id="overview" class="panel">
+          <h2>Overview</h2>
+          <p>This workflow runs a planner / executor / reviewer loop:</p>
+          <ol>
+            <li>A planner writes or refreshes <code>plan.md</code>.</li>
+            <li>Codex executes one planned step.</li>
+            <li>A reviewer approves the step or asks for changes.</li>
+            <li>The orchestrator writes compact resume state.</li>
+            <li>The loop continues until the workflow is done, blocked, failed, or interrupted.</li>
+          </ol>
+          <p>
+            The runner keeps durable workflow state in a workspace directory,
+            such as <code>workflow_runs/my-task</code>.
+          </p>
+        </section>
+
+        <section id="daily-commands">
+          <h2>Daily Commands</h2>
+          <p>
+            Run these commands from the repository root that contains the
+            <code>workflow/</code> directory.
+          </p>
+          <div class="command-grid">
+            <div class="command-card">
+              <strong>1. Start</strong>
+              <p>Create workspace files and launch the kickoff discussion.</p>
+            </div>
+            <div class="command-card">
+              <strong>2. Migrate</strong>
+              <p>Import context from an older run into a fresh workspace.</p>
+            </div>
+            <div class="command-card">
+              <strong>3. Loop</strong>
+              <p>Run the execute / review loop with the wrapper script.</p>
+            </div>
+          </div>
+        </section>
+
+        <section id="start" class="panel">
+          <h2>1. Start A Workflow With A Kickoff Discussion</h2>
+          <p>
+            Use <code>init</code> to create the workspace files and launch the
+            interactive discussion. The discussion summary is saved to
+            <code>discussion.md</code>; raw and normalized logs are saved under
+            <code>artifacts/</code>.
+          </p>
+
+          <h3>Gemini</h3>
+          <pre><code>python workflow/orchestrator.py \
+  --workspace workflow_runs/my-task \
+  --config workflow/configs/config.gemini.example.yaml \
+  init \
+  --task-summary "Build feature X" \
+  --model gemini-3.1-pro-preview</code></pre>
+
+          <h3>Claude</h3>
+          <pre><code>python workflow/orchestrator.py \
+  --workspace workflow_runs/my-task \
+  --config workflow/configs/config.claude.example.yaml \
+  init \
+  --task-summary "Build feature X" \
+  --model sonnet</code></pre>
+
+          <p class="note">
+            During <code>init</code>, the workflow asks for related links to
+            store in <code>task.md</code>. Enter one link per line, press Enter
+            on an empty line when finished, or type <code>none</code> to skip.
+            For scripted use, pass <code>--related-link</code> multiple times.
+          </p>
+        </section>
+
+        <section id="migrate" class="panel">
+          <h2>2. Continue From An Existing Workflow Run</h2>
+          <p>
+            Use <code>init --migrate-from-workspace</code> when you want a fresh
+            workspace that imports durable context from an older run, then
+            starts a new kickoff discussion from that imported handoff.
+          </p>
+
+          <pre><code>python workflow/orchestrator.py \
+  --workspace workflow_runs/my-task-rerun \
+  --config workflow/configs/config.gemini.example.yaml \
+  init \
+  --migrate-from-workspace workflow_runs/my-task</code></pre>
+
+          <p>
+            This writes <code>migration.md</code> in the destination workspace,
+            imports durable task and discussion context, resets workflow status
+            to planning, and copies <code>runtime.env</code> by default so model
+            choices follow the rerun. Use <code>--skip-migrate-runtime-env</code>
+            to opt out.
+          </p>
+        </section>
+
+        <section id="loop" class="panel">
+          <h2>3. Run The Execute / Review Loop</h2>
+          <p>Use the wrapper for loop runs:</p>
+
+          <pre><code>bash workflow/scripts/run_workflow.sh \
+  --workspace workflow_runs/my-task \
+  loop</code></pre>
+
+          <p>By default, loop runs start in the background and write:</p>
+          <ul>
+            <li><code>workflow_runs/my-task/workflow.output.log</code></li>
+            <li><code>workflow_runs/my-task/workflow.pid</code></li>
+          </ul>
+
+          <p>
+            The wrapper auto-selects the Gemini or Claude config from
+            <code>runtime.env</code> or model environment variables. Pass
+            <code>--config</code> only when you need to force a specific config.
+          </p>
+
+          <h3>Useful Variants</h3>
+          <pre><code># Stop after one approved step.
+bash workflow/scripts/run_workflow.sh \
+  --workspace workflow_runs/my-task \
+  loop --max-steps 1
+
+# Run in the foreground.
+WORKFLOW_DETACH=0 bash workflow/scripts/run_workflow.sh \
+  --workspace workflow_runs/my-task \
+  loop</code></pre>
+        </section>
+
+        <section id="workspace-files" class="panel">
+          <h2>Workspace Files</h2>
+          <ul class="file-list">
+            <li><code>task.md</code> task brief and related links.</li>
+            <li><code>discussion.md</code> kickoff discussion summary.</li>
+            <li><code>migration.md</code> optional imported handoff.</li>
+            <li><code>plan.md</code> generated workflow plan.</li>
+            <li><code>results.md</code> append-only execution and review journal.</li>
+            <li><code>progress.md</code> deterministic resume checkpoint.</li>
+            <li><code>summary.md</code> terminal workflow summary.</li>
+            <li><code>artifact_index.json</code> recent artifact index.</li>
+            <li><code>artifacts/</code> raw logs, command output, and failure artifacts.</li>
+            <li><code>runtime.env</code> per-workspace model overrides.</li>
+          </ul>
+        </section>
+
+        <section id="other-commands" class="panel">
+          <h2>Other Commands</h2>
+          <p>The orchestrator also exposes lower-level commands for manual control:</p>
+
+          <pre><code>python workflow/orchestrator.py --workspace workflow_runs/my-task --config workflow/configs/config.gemini.example.yaml plan
+python workflow/orchestrator.py --workspace workflow_runs/my-task --config workflow/configs/config.gemini.example.yaml run-step
+python workflow/orchestrator.py --workspace workflow_runs/my-task --config workflow/configs/config.gemini.example.yaml review
+python workflow/orchestrator.py --workspace workflow_runs/my-task --config workflow/configs/config.gemini.example.yaml status</code></pre>
+
+          <p>
+            Use <code>migrate</code> directly only when you want to import an
+            existing workflow without launching a kickoff discussion:
+          </p>
+
+          <pre><code>python workflow/orchestrator.py \
+  --workspace workflow_runs/my-task-rerun \
+  --config workflow/configs/config.gemini.example.yaml \
+  migrate \
+  --from-workspace workflow_runs/my-task</code></pre>
+        </section>
+
+        <section id="more-detail">
+          <h2>More Detail</h2>
+          <ul class="details-list">
+            <li>
+              <a href="configs/README.md">configs/README.md</a>
+              <span>Provider configs and model selection.</span>
+            </li>
+            <li>
+              <a href="scripts/README.md">scripts/README.md</a>
+              <span>Wrapper scripts, loop behavior, and environment hooks.</span>
+            </li>
+            <li>
+              <a href="memory/README.md">memory/README.md</a>
+              <span>Workflow-level lessons and lesson review process.</span>
+            </li>
+            <li>
+              <a href="utils/README.md">utils/README.md</a>
+              <span>Workspace state, migration behavior, verification contract, and evaluation gates.</span>
+            </li>
+          </ul>
+        </section>
+      </main>
+    </div>
+  </div>
+</body>
+</html>

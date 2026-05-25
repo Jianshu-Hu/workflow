@@ -1,31 +1,26 @@
 # Planner, Codex Execute Workflow
 
-This workflow runs a simple loop:
+This workflow runs a planner / executor / reviewer loop:
 
-1. A planner writes `plan.md`.
-2. Codex executes one step.
-3. A reviewer approves or rejects it.
-4. The orchestrator writes a compact `progress.md`.
-5. The loop continues until done.
+1. A planner writes or refreshes `plan.md`.
+2. Codex executes one planned step.
+3. A reviewer approves the step or asks for changes.
+4. The orchestrator writes compact resume state.
+5. The loop continues until the workflow is done, blocked, failed, or interrupted.
 
-## File Roles
+The runner keeps the durable workflow state in a workspace directory such as
+`workflow_runs/my-task`.
 
-- `plan.md`: operational plan. Completed steps are summarized; the current and upcoming steps stay detailed.
-- `progress.md`: compact resume note. It should contain only status, blockers, decisive evidence, and the next action.
-- `summary.md`: terminal handoff file. It records both the workflow execution status (`done`, `blocked`, `failed`, or `interrupted`) and the separate objective outcome (`pass`, `fail`, `inconclusive`, or `pending`).
-- `results.md`: append-only execution and review journal.
-- `artifacts/`: bulky command output and other raw evidence that should not live in workflow state files.
+## Daily Commands
 
-The workflow runner now enforces this structure so `plan.md` and `progress.md` do not grow without bound.
+Run these commands from the repository root that contains the `workflow/`
+directory.
 
-## Configs
+### 1. Start a workflow with a kickoff discussion
 
-- `workflow/configs/config.gemini.example.yaml`: Gemini planner, reviewer, and discussion.
-- `workflow/configs/config.claude.example.yaml`: Claude planner, reviewer, and discussion.
-
-Both configs use the same orchestrator. The only difference is which wrapper scripts they call.
-
-## Quick Start
+Use `init` to create the workspace files and launch the interactive discussion.
+The discussion summary is saved to `discussion.md`; raw and normalized logs are
+saved under `artifacts/`.
 
 Gemini:
 
@@ -36,16 +31,6 @@ python workflow/orchestrator.py \
   init \
   --task-summary "Build feature X" \
   --model gemini-3.1-pro-preview
-```
-
-Gemini with imported workflow context:
-
-```bash
-python workflow/orchestrator.py \
-  --workspace workflow_runs/my-task-rerun \
-  --config workflow/configs/config.gemini.example.yaml \
-  init \
-  --migrate-from-workspace workflow_runs/my-task
 ```
 
 Claude:
@@ -59,88 +44,15 @@ python workflow/orchestrator.py \
   --model sonnet
 ```
 
-During `init`, the workflow asks for related links to save in `task.md`.
-Enter one link per line, press Enter on an empty line when finished, or type `none` to skip.
-For scripted use, pass `--related-link` multiple times instead of using the prompt.
-The kickoff discussion saves raw `artifacts/discussion_input.log` and `artifacts/discussion_output.log`, then generates a normalized `artifacts/discussion_transcript.txt` with extracted user/assistant turns. The transcript cleanup filters terminal status lines, approval prompts, and tool noise before summarization. `discussion.md` is regenerated from that normalized transcript after the interactive session ends, and malformed summary output is rejected instead of overwriting the existing file.
-If `init` is passed `--migrate-from-workspace`, it imports the prior workflow into the new workspace first, writes `migration.md`, and the kickoff discussion starts from that imported context instead of a blank kickoff.
+During `init`, the workflow asks for related links to store in `task.md`. Enter
+one link per line, press Enter on an empty line when finished, or type `none` to
+skip. For scripted use, pass `--related-link` multiple times.
 
-Then run:
+### 2. Continue from an existing workflow run
 
-```bash
-python workflow/orchestrator.py \
-  --workspace workflow_runs/my-task \
-  --config workflow/configs/config.gemini.example.yaml \
-  loop
-```
-
-If that workspace uses Claude, swap the config path to `workflow/configs/config.claude.example.yaml`.
-
-## Model Selection
-
-`init` can persist model choices into `workflow_runs/<name>/runtime.env`.
-
-- `--model`: sets planner, reviewer, and discussion together
-- `--planner-model`: overrides only the planner
-- `--reviewer-model`: overrides only the reviewer
-- `--discussion-model`: overrides only the kickoff discussion
-
-Example:
-
-```bash
-python workflow/orchestrator.py \
-  --workspace workflow_runs/my-task \
-  --config workflow/configs/config.claude.example.yaml \
-  init \
-  --task-summary "Build feature X" \
-  --related-link https://github.com/example/project \
-  --related-link https://arxiv.org/abs/1234.5678 \
-  --planner-model sonnet \
-  --reviewer-model opus \
-  --discussion-model sonnet
-```
-
-Those values are reused automatically by later `plan`, `review`, and `loop` runs in the same workspace.
-
-## Common Commands
-
-```bash
-python workflow/orchestrator.py --workspace workflow_runs/my-task-rerun --config workflow/configs/config.gemini.example.yaml migrate --from-workspace workflow_runs/my-task
-python workflow/orchestrator.py --workspace workflow_runs/my-task --config workflow/configs/config.gemini.example.yaml plan
-python workflow/orchestrator.py --workspace workflow_runs/my-task --config workflow/configs/config.gemini.example.yaml run-step
-python workflow/orchestrator.py --workspace workflow_runs/my-task --config workflow/configs/config.gemini.example.yaml review
-python workflow/orchestrator.py --workspace workflow_runs/my-task --config workflow/configs/config.gemini.example.yaml status
-```
-
-## Migration
-
-Use `migrate` when an existing workflow run should hand off into a fresh workspace instead of resuming in place.
-This is useful after human intervention, repaired prerequisites, or when you want the planner to re-scope the unfinished work without carrying over terminal execution state.
-If you want to refresh workflow state inside the same workspace, use `migrate --in-place` with `--workspace` and `--from-workspace` pointing at that same workspace.
-
-Example:
-
-```bash
-python workflow/orchestrator.py \
-  --workspace workflow_runs/my-task-rerun \
-  --config workflow/configs/config.gemini.example.yaml \
-  migrate \
-  --from-workspace workflow_runs/my-task \
-  --task-summary "New destination objective"
-```
-
-In-place example:
-
-```bash
-python workflow/orchestrator.py \
-  --workspace workflow_runs/my-task \
-  --config workflow/configs/config.gemini.example.yaml \
-  migrate \
-  --from-workspace workflow_runs/my-task \
-  --in-place
-```
-
-If you want the migration and the kickoff discussion in one command, prefer:
+Use `init --migrate-from-workspace` when you want a fresh workspace that imports
+the durable context from an older run, then starts a new kickoff discussion from
+that imported handoff.
 
 ```bash
 python workflow/orchestrator.py \
@@ -150,145 +62,82 @@ python workflow/orchestrator.py \
   --migrate-from-workspace workflow_runs/my-task
 ```
 
-What `migrate` does:
+This writes `migration.md` in the destination workspace, imports durable task and
+discussion context, resets workflow status to planning, and copies `runtime.env`
+by default so model choices follow the rerun. Use
+`--skip-migrate-runtime-env` to opt out.
 
-- Creates a new destination workspace and refuses to overwrite an existing workflow state.
-- With `--in-place`, refreshes workflow state inside the same workspace instead of creating a new one. Existing workflow-state files are snapshotted first, and run-local payload stays in place.
-- Copies the durable task and discussion context from the source workspace.
-- If `--task-summary` is provided, records it as the new destination objective while keeping the source task as imported context.
-- Writes `migration.md` in the destination with a summarized handoff: completed work, latest review, open issues, unfinished step, and the next action from the source workflow.
-- Resets the destination workspace to fresh `planning` status so the next `plan` or `loop` run can continue from the imported handoff instead of pretending work already ran there.
-- Copies `runtime.env` from the source workspace by default so planner/reviewer model choices follow the migration. Pass `--skip-runtime-env` to opt out.
+### 3. Run the execute / review loop
+
+Use the wrapper for loop runs:
+
+```bash
+bash workflow/scripts/run_workflow.sh \
+  --workspace workflow_runs/my-task \
+  loop
+```
+
+By default, loop runs start in the background and write:
+
+- `workflow_runs/my-task/workflow.output.log`
+- `workflow_runs/my-task/workflow.pid`
+
+The wrapper auto-selects the Gemini or Claude config from `runtime.env` or model
+environment variables. Pass `--config` only when you need to force a specific
+config.
+
+Useful loop variants:
+
+```bash
+# Stop after one approved step.
+bash workflow/scripts/run_workflow.sh \
+  --workspace workflow_runs/my-task \
+  loop --max-steps 1
+
+# Run in the foreground.
+WORKFLOW_DETACH=0 bash workflow/scripts/run_workflow.sh \
+  --workspace workflow_runs/my-task \
+  loop
+```
 
 ## Workspace Files
 
-- `task.md`: task brief
-- `discussion.md`: kickoff discussion summary
-- `migration.md`: optional handoff summary imported from a previous workflow workspace
-- `plan.md`: generated workflow plan plus compact manifest-backed overview
-- `results.md`: append-only execution and review log
-- `progress.md`: deterministic resume checkpoint
-- `summary.md`: terminal workflow summary covering final execution status, objective outcome, achieved work, implemented changes, remaining issues, and next steps
-- `artifact_index.json`: structured index of recent workflow artifacts such as results sections, discussion logs, and command failure outputs
-- `artifacts/`: raw logs and failure artifacts
-- `runtime.env`: per-workspace model overrides
+- `task.md`: task brief and related links.
+- `discussion.md`: kickoff discussion summary.
+- `migration.md`: optional handoff imported from a previous workflow workspace.
+- `plan.md`: generated workflow plan with compact manifest-backed state.
+- `results.md`: append-only execution and review journal.
+- `progress.md`: deterministic resume checkpoint.
+- `summary.md`: terminal workflow summary.
+- `artifact_index.json`: structured index of recent workflow artifacts.
+- `artifacts/`: raw logs, command output, and failure artifacts.
+- `runtime.env`: per-workspace model overrides.
 
-## Step Verification Contract
+## Other Commands
 
-After an executor run, the orchestrator now checks the newest `results.md` section for the current step before allowing review.
-The section must be headed `## Step <id> - <title>` and must include these exact subsections:
-
-- `### Acceptance Evidence`: every acceptance criterion mapped to `pass`, `fail`, or `inconclusive` with concrete evidence. Use the criterion ids from the executor prompt (`AC1`, `AC2`, ...); the orchestrator also keeps a legacy text-matching fallback for older result sections.
-- `### Verification Evidence`: every verification requirement mapped to the command or check performed, working directory, exit/return code when command-based, artifact path when available, and result. Use the verification ids from the executor prompt (`V1`, `V2`, ...); the orchestrator also keeps a legacy text-matching fallback for older result sections.
-- `### Changed Files`: every changed file and why it changed, or an explicit statement that no files changed.
-- `### Outcome`: `pass`, `fail`, or `inconclusive`, plus remaining risks.
-
-If the evidence is missing, vague, still running, to be verified later, or lacks command exit codes for command-based checks, the step remains `needs_changes`.
-Evidence may state that a check was gated off, blocked, or not applicable only when it records a terminal `fail` or `inconclusive` decision with concrete artifact or command evidence for that gate.
-The workflow writes an evidence contract report under `artifacts/command_failures/` so the same step can be resumed with the missing proof.
-
-When a step uses an explicit checkpoint, dataset, log, or other artifact path, the executor must validate that exact path and must not silently fall back to an older default artifact. Review should reject evidence that relies on an explicit artifact path without proving which artifact was used.
-
-## Evaluation Readiness Gates
-
-Expensive evaluations should be protected by a cheap gate whenever the workflow can run one. For policy-learning tasks, this usually means a replay audit, one-episode validation, or 1-5 episode smoke test before a full benchmark. Add `blocks_downstream_on_fail: true` to any manifest step whose failed measured outcome should prevent later evaluation or benchmark steps from running.
-
-Before launching a full policy evaluation, the plan should include evidence for the relevant items below:
-
-- Explicit checkpoint, dataset, zarr, config, and log paths exist and are the exact artifacts used by the command.
-- Expert action replay succeeds from stored initial states in the same evaluation environment.
-- Restored observations, point clouds, `agent_pos`, camera/extrinsic handling, and action dimensions match the processed training samples.
-- Teacher-forced policy predictions on validation/demo observations have low per-action-dimension error, with gripper/base/control-mode groups inspected separately.
-- A smallest-useful closed-loop validation has nonzero success or otherwise shows a new behavior worth evaluating at larger scale.
-- If a smoke or replay gate fails, replan a remediation/diagnostic before running the full benchmark.
-
-## Workflow-Level Lessons
-
-Curated cross-run lessons live in `workflow/memory/lessons.yaml`.
-These are global workflow memories, not project handoff state; normal project context should still move through `migrate`.
-Use `workflow/memory/lesson_evaluation.md` to review candidates with Codex, Gemini, Claude, and human before activation.
-
-Lesson confidence is numeric:
-
-- `0`: candidate/init. Stored for review, but not injected into planner, executor, or reviewer prompts.
-- `1` to `10`: active confidence. Relevant lessons are selected by trigger terms/scope and injected into prompts.
-- `-1` to `-5`: rejected. Kept as an audit record, never injected.
-
-The reviewer can propose new workflow-level lessons in its JSON output only when a concrete run event exposed a reusable failure mode or non-obvious constraint.
-Valid triggers include implementation corrections, review gaps, workflow mechanism gaps, rerun repairs, stopped or interrupted runs that required human intervention before rerun, direct human intervention, and constraints discovered through failure.
-Successful first-pass implementations and ordinary best practices should not become lesson candidates.
-Those proposals are written to the workspace-local `lesson_candidates.yaml` with `confidence: 0`, a `reason_category`, and an artifact-backed `trigger_event`.
-They are not added to global active memory automatically.
-
-Human processing flow:
-
-- Inspect `lesson_candidates.yaml` and the cited artifacts.
-- Run `workflow/scripts/evaluate_lesson.sh <workflow-run-folder>` to ask Codex, Gemini, and Claude to independently review whether the lesson has a valid trigger event, is evidence-backed, scoped correctly, actionable, and falsifiable.
-- If any reviewer objects, either revise the candidate or mark it rejected with negative confidence.
-- If all reviewers and the human approve, copy the lesson into `workflow/memory/lessons.yaml` at `confidence: 0` or promote it to `1` if the human wants it active as a low-confidence advisory.
-- Increase confidence only after a future run shows the lesson was useful, then repeat Codex, Claude, Gemini, and human review before promotion.
-
-The evaluator writes raw prompts, raw model outputs, parsed review summaries, and `human_review.md` under `<workflow-run-folder>/lesson_reviews/`.
-Use `--lesson-id <id>` to review one candidate and `--dry-run` to verify report generation without calling model CLIs.
-
-## Wrappers
-
-- `workflow/scripts/run_gemini_noninteractive.sh`
-- `workflow/scripts/run_gemini_discussion.sh`
-- `workflow/scripts/run_claude_noninteractive.sh`
-- `workflow/scripts/run_claude_discussion.sh`
-- `workflow/scripts/run_codex_executor.sh`
-
-The Gemini and Claude wrappers read prompts from files so large prompts do not overflow shell argument limits.
-
-## Bootstrap And Preflight Hooks
-
-`workflow/scripts/run_workflow.sh` supports two useful environment hooks:
-
-- `WORKFLOW_BOOTSTRAP_SCRIPT`: preferred. Runs before the orchestrator starts. Point this at an executable script for idempotent setup such as activating caches, downloading known public prerequisites, syncing asset mirrors, or materializing generated config files.
-- `WORKFLOW_PREFLIGHT_SCRIPT`: preferred. Runs after the launcher prints host details but before the workflow loop begins. Point this at an executable script for fast host validation such as checking GPU visibility, mounted paths, required binaries, or required files/directories.
-- `WORKFLOW_BOOTSTRAP_CMD`: legacy shell-string fallback for bootstrap when a dedicated script is not yet available.
-- `WORKFLOW_PREFLIGHT_CMD`: legacy shell-string fallback for preflight when a dedicated script is not yet available.
-
-Recommended pattern:
-
-- Use `WORKFLOW_BOOTSTRAP_SCRIPT` for actions that can repair missing prerequisites.
-- Keep those actions idempotent and resumable so repeated workflow runs are cheap.
-- Keep task-specific bootstrap logic outside the `workflow/` submodule, for example in repository-level scripts that the workflow invokes via environment variables.
-- Stage large shared assets into stable paths or caches outside per-run workspaces when possible.
-- Reserve `WORKFLOW_PREFLIGHT_SCRIPT` for quick checks; it should fail fast, not perform long downloads.
-- Prefer script hooks over shell-string hooks so quoting is predictable and workflow setup remains easy to audit.
-
-Example:
+The orchestrator also exposes lower-level commands for manual control:
 
 ```bash
-export WORKFLOW_BOOTSTRAP_SCRIPT="$PWD/scripts/prepare_prereqs.sh"
-export WORKFLOW_PREFLIGHT_SCRIPT="$PWD/scripts/preflight_check.sh"
-python workflow/orchestrator.py --workspace workflow_runs/my-task --config workflow/configs/config.gemini.example.yaml loop
+python workflow/orchestrator.py --workspace workflow_runs/my-task --config workflow/configs/config.gemini.example.yaml plan
+python workflow/orchestrator.py --workspace workflow_runs/my-task --config workflow/configs/config.gemini.example.yaml run-step
+python workflow/orchestrator.py --workspace workflow_runs/my-task --config workflow/configs/config.gemini.example.yaml review
+python workflow/orchestrator.py --workspace workflow_runs/my-task --config workflow/configs/config.gemini.example.yaml status
 ```
 
-## Launcher Default
-
-`workflow/scripts/run_workflow.sh` now defaults to:
+Use `migrate` directly only when you want to import an existing workflow without
+launching a kickoff discussion:
 
 ```bash
-python workflow/orchestrator.py --workspace workflow_runs/default --config workflow/configs/config.gemini.example.yaml loop
+python workflow/orchestrator.py \
+  --workspace workflow_runs/my-task-rerun \
+  --config workflow/configs/config.gemini.example.yaml \
+  migrate \
+  --from-workspace workflow_runs/my-task
 ```
 
-## Outcome Follow-Ups
+## More Detail
 
-Reviews can now approve a step while still marking its outcome as `fail` or `inconclusive`.
-This is useful for benchmarks and evaluations where the run completed, but the measured result is still unacceptable or ambiguous.
-
-When a step is approved with `outcome_status=fail`, the workflow automatically inserts a follow-up investigation step if one does not already exist.
-That keeps failed benchmark results visible as explicit workflow work instead of burying them only in `results.md`.
-Automatically generated follow-up steps do not recursively create more follow-ups when they are approved with `outcome_status=fail`.
-If the investigation documents that no workflow-side remediation remains, the workflow can finish as `done` while the objective outcome remains `fail`.
-
-Failed gate steps can also block downstream work. Set `blocks_downstream_on_fail: true` on an explicit gate step, or rely on the built-in smoke-evaluation heuristic for steps whose id/title/objective contain smoke plus evaluation/benchmark/test language. When such a step is approved with `outcome_status=fail`, pending downstream evaluation or benchmark steps are marked `blocked` with the failure reason. Automatically generated follow-up investigation steps remain runnable even if their objective mentions evaluation artifacts. The planner must then add or choose a remediation step before another full evaluation can run.
-
-Workflow completion and objective achievement are tracked separately:
-
-- Workflow execution status answers whether the workflow has any remaining actionable steps.
-- Objective outcome answers whether the user-facing goal was actually achieved.
-- A workflow can finish execution as `done` while still reporting objective outcome `fail` or `inconclusive` if approved steps documented unresolved benchmark or quality failures.
+- `workflow/configs/README.md`: provider configs and model selection.
+- `workflow/scripts/README.md`: wrapper scripts, loop behavior, and environment hooks.
+- `workflow/memory/README.md`: workflow-level lessons and lesson review process.
+- `workflow/utils/README.md`: workspace state, migration behavior, verification contract, and evaluation gates.
