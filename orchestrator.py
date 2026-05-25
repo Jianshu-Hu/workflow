@@ -146,6 +146,10 @@ CONDITIONAL_INCOMPLETE_EVIDENCE_PATTERNS = (
     r"\bskipped\b",
     r"(?<![A-Za-z0-9])n\s*/\s*a(?![A-Za-z0-9])",
 )
+BENIGN_NOT_APPLICABLE_EVIDENCE_PATTERNS = (
+    r"\bartifact\s+path\s*:\s*(?:not\s+applicable|n\s*/\s*a)\b",
+    r"\bartifact\s*:\s*(?:not\s+applicable|n\s*/\s*a)\b",
+)
 EVIDENCE_STATUS_PATTERN = (
     r"\b(?:AC|V)\s*\d+\s*[:=-]?\s*(?:fail|inconclusive)\b|"
     r"\b(?:fail|inconclusive)\s*:"
@@ -710,6 +714,13 @@ def evidence_has_terminal_gate_context(statement: str) -> bool:
     return has_status and has_gate_or_blocker and has_concrete_evidence
 
 
+def strip_benign_not_applicable_evidence_phrases(statement: str) -> str:
+    stripped = statement
+    for pattern in BENIGN_NOT_APPLICABLE_EVIDENCE_PATTERNS:
+        stripped = re.sub(pattern, "", stripped, flags=re.IGNORECASE)
+    return stripped
+
+
 def incomplete_evidence_language_issues(text: str) -> list[str]:
     issues: list[str] = []
     for statement in evidence_statement_chunks(text):
@@ -718,8 +729,9 @@ def incomplete_evidence_language_issues(text: str) -> list[str]:
                 "Evidence contains incomplete-verification language such as still running or to be verified."
             )
             continue
+        statement_without_benign_na = strip_benign_not_applicable_evidence_phrases(statement)
         if any(
-            re.search(pattern, statement, re.IGNORECASE)
+            re.search(pattern, statement_without_benign_na, re.IGNORECASE)
             for pattern in CONDITIONAL_INCOMPLETE_EVIDENCE_PATTERNS
         ) and not evidence_has_terminal_gate_context(statement):
             issues.append(
@@ -1057,6 +1069,45 @@ def discussion_model_name(config: dict[str, Any]) -> str:
         or config.get("discussion", {}).get("model")
         or planner_model_name(config)
     )
+
+
+def initial_workspace_model_overrides(
+    config: dict[str, Any],
+    *,
+    planner_model: str = "",
+    reviewer_model: str = "",
+    discussion_model: str = "",
+) -> dict[str, str]:
+    """Resolve model defaults to persist for a workspace at init time.
+
+    Persisting these values keeps later wrapper invocations on the same provider
+    as the kickoff discussion even when the user omits `--config`.
+    """
+    resolved_discussion_model = (
+        discussion_model.strip()
+        or os.environ.get("WORKFLOW_DISCUSSION_MODEL", "").strip()
+        or os.environ.get("WORKFLOW_CLAUDE_DISCUSSION_MODEL", "").strip()
+        or os.environ.get("WORKFLOW_GEMINI_DISCUSSION_MODEL", "").strip()
+        or str(config.get("discussion", {}).get("model", "")).strip()
+        or str(config.get("planner", {}).get("model", "")).strip()
+    )
+    resolved_planner_model = (
+        planner_model.strip()
+        or os.environ.get("WORKFLOW_PLANNER_MODEL", "").strip()
+        or str(config.get("planner", {}).get("model", "")).strip()
+        or resolved_discussion_model
+    )
+    resolved_reviewer_model = (
+        reviewer_model.strip()
+        or os.environ.get("WORKFLOW_REVIEWER_MODEL", "").strip()
+        or str(config.get("reviewer", {}).get("model", "")).strip()
+        or resolved_planner_model
+    )
+    return {
+        "WORKFLOW_PLANNER_MODEL": resolved_planner_model,
+        "WORKFLOW_REVIEWER_MODEL": resolved_reviewer_model,
+        "WORKFLOW_DISCUSSION_MODEL": resolved_discussion_model,
+    }
 
 
 def build_planner_prompt(paths: WorkflowPaths, config: dict[str, Any]) -> str:
@@ -2663,26 +2714,22 @@ def main(argv: list[str] | None = None) -> int:
                     task_summary=args.task_summary,
                     related_links=related_links,
                 )
-            planner_model = args.planner_model.strip() or args.model.strip()
-            reviewer_model = args.reviewer_model.strip() or args.model.strip()
-            discussion_model = args.discussion_model.strip() or args.model.strip()
-            runtime_model_overrides = {
-                "WORKFLOW_PLANNER_MODEL": planner_model,
-                "WORKFLOW_REVIEWER_MODEL": reviewer_model,
-                "WORKFLOW_DISCUSSION_MODEL": discussion_model,
-            }
-            if any(runtime_model_overrides.values()):
-                upsert_runtime_env_file(
-                    paths.root / "runtime.env",
-                    runtime_model_overrides,
-                )
-                apply_runtime_env_overrides(runtime_model_overrides)
+            runtime_model_overrides = initial_workspace_model_overrides(
+                config,
+                planner_model=args.planner_model.strip() or args.model.strip(),
+                reviewer_model=args.reviewer_model.strip() or args.model.strip(),
+                discussion_model=args.discussion_model.strip() or args.model.strip(),
+            )
+            upsert_runtime_env_file(
+                paths.root / "runtime.env",
+                runtime_model_overrides,
+            )
+            apply_runtime_env_overrides(runtime_model_overrides)
             print(f"Initialized workflow workspace at {paths.root}")
             if migrated_during_init:
                 print(f"Imported migration handoff from {Path(migration_source).resolve()}")
                 print(f"Saved migration summary in {paths.migration_md}")
-            if any(runtime_model_overrides.values()):
-                print(f"Saved workspace model overrides in {paths.root / 'runtime.env'}")
+            print(f"Saved workspace model overrides in {paths.root / 'runtime.env'}")
             if refreshed_placeholders:
                 print(f"Updated placeholder workflow files in {paths.root} with the provided task summary.")
             if task_md_already_exists and not migrated_during_init and not refreshed_placeholders:

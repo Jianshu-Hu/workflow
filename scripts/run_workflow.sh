@@ -229,6 +229,30 @@ detect_provider_from_environment() {
   return 1
 }
 
+detect_provider_from_discussion_artifacts() {
+  local workspace_dir_local="$1"
+  local path
+  local provider=""
+
+  for path in \
+    "${workspace_dir_local}/prompts/discussion_prompt.txt" \
+    "${workspace_dir_local}/prompts/discussion_summary_prompt.txt" \
+    "${workspace_dir_local}/artifacts/discussion_transcript.txt" \
+    "${workspace_dir_local}/artifacts/discussion_input.log"
+  do
+    if [[ ! -f "${path}" ]]; then
+      continue
+    fi
+    provider=$(detect_provider_from_hint "$(sed -n '1,80p' "${path}")" || true)
+    if [[ -n "${provider}" ]]; then
+      printf '%s\n' "${provider}"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
 print_path_summary() {
   echo "[workflow] launch_dir=${launch_dir}"
   echo "[workflow] workflow_root=${workflow_root}"
@@ -258,6 +282,9 @@ resolve_default_config_path() {
   provider=$(detect_provider_from_runtime_env "${workspace_dir_local}/runtime.env" || true)
   if [[ -z "${provider}" ]]; then
     provider=$(detect_provider_from_environment || true)
+  fi
+  if [[ -z "${provider}" ]]; then
+    provider=$(detect_provider_from_discussion_artifacts "${workspace_dir_local}" || true)
   fi
 
   case "${provider}" in
