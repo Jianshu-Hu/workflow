@@ -96,6 +96,32 @@ resolve_workspace_dir() {
   fi
 }
 
+resolve_repo_root() {
+  local workflow_root_local="$1"
+  local launch_dir_local="$2"
+  local launch_git_root=""
+  local parent_git_root=""
+
+  if [[ -n "${WORKFLOW_REPO_ROOT:-}" ]]; then
+    printf '%s\n' "${WORKFLOW_REPO_ROOT}"
+    return 0
+  fi
+
+  launch_git_root=$(git -C "${launch_dir_local}" rev-parse --show-toplevel 2>/dev/null || true)
+  if [[ -n "${launch_git_root}" && "${launch_git_root}" != "${workflow_root_local}" ]]; then
+    printf '%s\n' "${launch_git_root}"
+    return 0
+  fi
+
+  parent_git_root=$(git -C "${workflow_root_local}/.." rev-parse --show-toplevel 2>/dev/null || true)
+  if [[ -n "${parent_git_root}" && "${parent_git_root}" != "${workflow_root_local}" ]]; then
+    printf '%s\n' "${parent_git_root}"
+    return 0
+  fi
+
+  printf '%s\n' "$(cd "${workflow_root_local}/.." && pwd)"
+}
+
 detect_provider_from_hint() {
   local hint="${1:-}"
 
@@ -203,6 +229,14 @@ detect_provider_from_environment() {
   return 1
 }
 
+print_path_summary() {
+  echo "[workflow] launch_dir=${launch_dir}"
+  echo "[workflow] workflow_root=${workflow_root}"
+  echo "[workflow] repo_root=${repo_root}"
+  echo "[workflow] config=${config_path}"
+  echo "[workflow] workspace=${workspace_dir}"
+}
+
 run_hook_command() {
   local label="$1"
   shift
@@ -272,6 +306,7 @@ prepare_detached_workspace() {
   fi
 }
 
+launch_dir=$(pwd)
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 script_path="${BASH_SOURCE[0]}"
 if command -v realpath >/dev/null 2>&1; then
@@ -281,7 +316,7 @@ elif command -v readlink >/dev/null 2>&1; then
 fi
 
 workflow_root=$(cd "${script_dir}/.." && pwd)
-repo_root=${WORKFLOW_REPO_ROOT:-$(cd "${workflow_root}/.." && pwd)}
+repo_root=$(resolve_repo_root "${workflow_root}" "${launch_dir}")
 python_bin=${WORKFLOW_PYTHON:-python}
 default_workspace=${WORKFLOW_WORKSPACE:-workflow_runs/default}
 cli_workspace=$(extract_cli_option_value --workspace "$@" || true)
@@ -301,6 +336,7 @@ python_bin=$(resolve_python_bin "${python_bin}")
 
 if [[ "${WORKFLOW_DETACHED:-0}" != "1" && "${WORKFLOW_DETACH:-1}" == "1" ]]; then
   if [[ $# -eq 0 || "${workflow_command}" == "loop" ]]; then
+    print_path_summary
     mkdir -p "${workspace_dir}"
     log_file=${WORKFLOW_LOG_FILE:-${workspace_dir}/workflow.output.log}
     pid_file=${WORKFLOW_PID_FILE:-${workspace_dir}/workflow.pid}
@@ -316,7 +352,6 @@ if [[ "${WORKFLOW_DETACHED:-0}" != "1" && "${WORKFLOW_DETACH:-1}" == "1" ]]; the
 
     echo "[workflow] started in background"
     echo "[workflow] pid=${workflow_pid}"
-    echo "[workflow] workspace=${workspace_dir}"
     echo "[workflow] log=${log_file}"
     exit 0
   fi
@@ -339,10 +374,8 @@ export WORKFLOW_RENDER_PREFLIGHT_CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-<
 export WORKFLOW_RENDER_PREFLIGHT_STATUS="not-run"
 
 echo "[workflow] hostname=$(hostname)"
-echo "[workflow] repo_root=${repo_root}"
+print_path_summary
 echo "[workflow] python=${python_bin}"
-echo "[workflow] config=${config_path}"
-echo "[workflow] workspace=${workspace_dir}"
 echo "[workflow] log_file=${WORKFLOW_LOG_FILE:-<stdout>}"
 echo "[workflow] CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>}"
 echo "[workflow] WORKFLOW_EXECUTOR_CWD=${WORKFLOW_EXECUTOR_CWD}"
