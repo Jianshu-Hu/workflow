@@ -42,7 +42,7 @@ from utils.common import (
     save_artifact_index,
     update_state_timestamp,
     upsert_runtime_env_file,
-    utc_now,
+    workflow_now,
     write_prompt_file,
 )
 from utils.discussion import (
@@ -226,14 +226,14 @@ def ensure_workflow_files(
         save_artifact_index(
             paths.artifact_index_json,
             {
-                "updated_at": utc_now(),
+                "updated_at": workflow_now(),
                 "artifacts": [],
             },
         )
 
     if not paths.state_json.exists():
         initial_state = {
-            "created_at": utc_now(),
+            "created_at": workflow_now(),
             "last_discussion_launch_at": None,
             "last_planner_run_at": None,
             "last_codex_run_at": None,
@@ -256,7 +256,7 @@ def ensure_workflow_files(
             "last_progress_update_at",
         ):
             if key not in state:
-                state[key] = utc_now() if key == "created_at" else None
+                state[key] = workflow_now() if key == "created_at" else None
                 changed = True
         if changed:
             save_state(paths.state_json, state)
@@ -409,7 +409,7 @@ def append_artifact_record(
     artifacts = index.setdefault("artifacts", [])
     artifacts.append(
         {
-            "timestamp": utc_now(),
+            "timestamp": workflow_now(),
             "category": category,
             "label": label,
             "path": str(path.resolve()),
@@ -418,7 +418,7 @@ def append_artifact_record(
         }
     )
     index["artifacts"] = artifacts[-200:]
-    index["updated_at"] = utc_now()
+    index["updated_at"] = workflow_now()
     save_artifact_index(paths.artifact_index_json, index)
 
 
@@ -860,7 +860,7 @@ def index_existing_workspace_artifacts(paths: WorkflowPaths) -> None:
             continue
         artifacts.append(
             {
-                "timestamp": utc_now(),
+                "timestamp": workflow_now(),
                 "category": category,
                 "label": label,
                 "path": resolved_path,
@@ -873,7 +873,7 @@ def index_existing_workspace_artifacts(paths: WorkflowPaths) -> None:
 
     if changed:
         index["artifacts"] = artifacts[-200:]
-        index["updated_at"] = utc_now()
+        index["updated_at"] = workflow_now()
         save_artifact_index(paths.artifact_index_json, index)
 
 
@@ -1868,7 +1868,7 @@ def run_planner(paths: WorkflowPaths, config: dict[str, Any]) -> None:
     append_results_section_with_index(
         paths,
         "Planner Update",
-        f"Generated or refreshed `{paths.plan_md.name}` at {utc_now()}.",
+        f"Generated or refreshed `{paths.plan_md.name}` at {workflow_now()}.",
     )
 
 
@@ -2132,7 +2132,7 @@ def normalize_lesson_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
     normalized.setdefault("review_required", ["codex", "claude", "gemini", "human"])
     normalized.setdefault("reviews", {"codex": "pending", "claude": "pending", "gemini": "pending", "human": "pending"})
     normalized.setdefault("status", "candidate")
-    normalized.setdefault("created_at", utc_now())
+    normalized.setdefault("created_at", workflow_now())
     return normalized
 
 
@@ -2237,7 +2237,7 @@ def save_lesson_candidates(paths: WorkflowPaths, candidates: list[dict[str, Any]
             item["source"].setdefault("step_id", step["id"])
             item["source"].setdefault("results", str(paths.results_md))
         existing.append(item)
-    data["updated_at"] = utc_now()
+    data["updated_at"] = workflow_now()
     paths.lesson_candidates_yaml.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=False), encoding="utf-8")
 
 

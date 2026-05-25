@@ -5,7 +5,7 @@ import json
 import os
 import shlex
 import sys
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -300,8 +300,16 @@ def render_discussion_template(task_summary: str = "") -> str:
     ) + "\n"
 
 
+def local_now() -> str:
+    return datetime.now().astimezone().replace(microsecond=0).isoformat()
+
+
+def workflow_now() -> str:
+    return local_now()
+
+
 def utc_now() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    return workflow_now()
 
 
 def parse_bool(value: Any, *, field_name: str) -> bool:
@@ -465,7 +473,7 @@ def save_state(state_path: Path, state: dict[str, Any]) -> None:
 
 def update_state_timestamp(state_path: Path, key: str) -> None:
     state = load_state(state_path)
-    state[key] = utc_now()
+    state[key] = workflow_now()
     save_state(state_path, state)
 
 

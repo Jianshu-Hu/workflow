@@ -18,7 +18,7 @@ from utils.common import (
     render_task_template,
     save_artifact_index,
     save_state,
-    utc_now,
+    workflow_now,
 )
 from utils.manifest import (
     clip_history_details,
@@ -588,7 +588,7 @@ def run_migration(
     task_summary = task_summary_override.strip() or extract_task_summary(
         source_task_text, str(source_manifest.get("task", ""))
     )
-    imported_at = utc_now()
+    imported_at = workflow_now()
 
     if in_place:
         snapshot_root = snapshot_in_place_workflow_state(dest_paths, imported_at=imported_at)

@@ -17,7 +17,7 @@ from utils.common import (
     WorkflowError,
     WorkflowPaths,
     clip_text,
-    utc_now,
+    workflow_now,
 )
 
 
@@ -308,7 +308,7 @@ def create_default_manifest(task_summary: str = "") -> dict[str, Any]:
         "current_step": None,
         "steps": [],
         "history": [],
-        "updated_at": utc_now(),
+        "updated_at": workflow_now(),
     }
     return sync_workflow_outcome(manifest)
 
@@ -500,7 +500,7 @@ def save_plan_manifest(plan_path: Path, manifest: dict[str, Any], plan_text: str
     del plan_text
     compact_manifest = compact_manifest_for_storage(manifest)
     validate_manifest(compact_manifest)
-    compact_manifest["updated_at"] = utc_now()
+    compact_manifest["updated_at"] = workflow_now()
     plan_path.write_text(render_plan_document(compact_manifest), encoding="utf-8")
 
 
@@ -578,7 +578,7 @@ def mark_step_status(
             "step_id": step_id,
             "event": event,
             "details": details,
-            "timestamp": utc_now(),
+            "timestamp": workflow_now(),
         }
     )
     save_plan_manifest(plan_path, manifest, plan_text)
@@ -598,7 +598,7 @@ def append_history_event(
             "step_id": step_id,
             "event": event,
             "details": details,
-            "timestamp": utc_now(),
+            "timestamp": workflow_now(),
         }
     )
     save_plan_manifest(plan_path, manifest, plan_text)
@@ -632,7 +632,7 @@ def approve_step(
                 f"{review_summary}\nOutcome: {outcome_status}"
                 + (f" - {outcome_reason.strip()}" if outcome_reason.strip() else "")
             ),
-            "timestamp": utc_now(),
+            "timestamp": workflow_now(),
         }
     )
 
@@ -680,7 +680,7 @@ def approve_step(
                     "details": (
                         f"Automatically added follow-up step after approved outcome_status=fail on '{step_id}'."
                     ),
-                    "timestamp": utc_now(),
+                    "timestamp": workflow_now(),
                 }
             )
     elif outcome_status == "fail" and is_auto_followup_step_id(step_id):
@@ -693,7 +693,7 @@ def approve_step(
                     "not adding another nested follow-up. The unresolved objective failure "
                     "will remain visible in workflow_outcome and summary.md."
                 ),
-                "timestamp": utc_now(),
+                "timestamp": workflow_now(),
             }
         )
 
@@ -721,7 +721,7 @@ def approve_step(
                         "Blocked pending downstream evaluation/benchmark steps after failed gate: "
                         + ", ".join(blocked_steps)
                     ),
-                    "timestamp": utc_now(),
+                    "timestamp": workflow_now(),
                 }
             )
 
