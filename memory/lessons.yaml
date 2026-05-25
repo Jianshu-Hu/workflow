@@ -15,3 +15,65 @@ review_policy:
   promotion_rule: Increase confidence only after future workflow usage shows the lesson prevented or detected a real issue, followed by codex, claude, gemini, and human review.
   rejection_rule: Use -1 to -5 when a candidate is unsupported, overgeneralized, harmful, or superseded.
 lessons:
+  - id: verify-train-eval-action-image-processing-parity
+    title: Verify action normalization parity between training and evaluation
+    confidence: 1
+    reason_category: implementation_correction
+    trigger_event: >
+      During the investigate_wm_evaluation workflow, evaluation could run
+      successfully while producing invalid robot policy behavior because training
+      normalized actions but checkpoints did not consistently provide action_mean
+      and action_std to evaluation, and normalized action outputs could be passed
+      to the environment instead of denormalized raw action targets. The workflow
+      repaired this by saving action statistics during training, loading them
+      during evaluation, keeping model rollout in normalized action space, and
+      denormalizing before environment execution.
+    claim: >
+      For robot policy workflows that train or roll out models in normalized
+      action space, evaluation must use the same saved action statistics and
+      apply inverse normalization at the environment-execution boundary;
+      otherwise evaluation can run cleanly while measuring action-contract drift
+      rather than policy quality.
+    applies_when:
+      - Training normalizes actions, action deltas, joint targets, or control commands before model learning
+      - Evaluation loads checkpoints and independently reconstructs action transforms or executes predicted actions in an environment
+      - CEM, policy rollout, or world-model rollout operates in normalized action space but environment APIs expect raw action targets
+      - Robot evaluation metrics are unexpectedly poor despite successful checkpoint loading and inference
+    does_not_apply_when:
+      - Training and evaluation both use raw, unnormalized actions end to end
+      - Training and evaluation call the same shared, tested action preprocessing and inverse-preprocessing functions
+      - Evaluation is offline-only and never converts predicted normalized actions back to environment actions
+    required_checks:
+      - Confirm checkpoints or sidecar metadata contain the action statistics or bounds needed by evaluation, including names, tensor shapes, device, dtype, and action dimension order
+      - Compare the training action-normalization path with the evaluation load and inverse-normalization path
+      - Verify rollout code keeps predictor inputs in the expected normalized action space while denormalizing only before environment execution
+      - Run a one-sample parity check that normalizes a recorded training action and then inverse-normalizes it through the evaluation path within a defined tolerance
+    evidence:
+      - path: /home/jianshu/workspace/MambaController/workflow_runs/investigate_wm_evaluation/results.md
+        claim: >
+          Workflow results describe fixes for saving action statistics during
+          training, loading action_mean and action_std during evaluation, keeping
+          rollout in normalized action space, and denormalizing before
+          execute_action_block.
+      - path: /home/jianshu/workspace/MambaController/workflow_runs/investigate_wm_evaluation/discussion.md
+        claim: >
+          Workflow discussion identified action-normalization contract drift as a
+          concrete evaluation failure mode.
+      - path: /home/jianshu/workspace/MambaController/workflow_runs/investigate_wm_evaluation/lesson_reviews/20260525T123406Z_verify-train-eval-action-image-processing-parity/human_review.md
+        claim: Codex, Gemini, and Claude approved the narrowed lesson candidate.
+    falsification_conditions:
+      - A recorded-sample parity test proves that training normalization and evaluation inverse-normalization round-trip actions within the expected tolerance
+      - Training and evaluation are refactored to call the same shared, tested action transform contract
+      - The workflow uses no action normalization, no action scaling, and no separate environment-execution action conversion
+    review_required:
+      - codex
+      - claude
+      - gemini
+      - human
+    reviews:
+      codex: approved
+      claude: approved
+      gemini: approved
+      human: approved
+    status: candidate
+    created_at: "2026-05-25T20:12:45+08:00"
