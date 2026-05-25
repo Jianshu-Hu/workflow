@@ -94,6 +94,8 @@ def resolve_workspace(raw_workspace: str) -> Path:
         workspace = workspace.resolve()
     if not workspace.exists():
         raise SystemExit(f"Workflow run folder does not exist: {workspace}")
+    if workspace.is_file() and workspace.name == "lesson_candidates.yaml":
+        workspace = workspace.parent
     if not workspace.is_dir():
         raise SystemExit(f"Workflow run path is not a directory: {workspace}")
     return workspace
@@ -319,12 +321,15 @@ def default_agent_specs() -> list[AgentSpec]:
 
 
 def parse_command_template(template: str, *, prompt_file: Path, workspace: Path, model: str) -> list[str]:
-    formatted = template.format(
-        prompt_file=str(prompt_file),
-        workspace=str(workspace),
-        repo_root=str(REPO_ROOT),
-        model=model,
-    )
+    replacements = {
+        "{prompt_file}": str(prompt_file),
+        "{workspace}": str(workspace),
+        "{repo_root}": str(REPO_ROOT),
+        "{model}": model,
+    }
+    formatted = template
+    for placeholder, value in replacements.items():
+        formatted = formatted.replace(placeholder, value)
     return shlex.split(formatted)
 
 
@@ -362,7 +367,7 @@ def run_agent(
     command = parse_command_template(spec.command_template, prompt_file=prompt_path, workspace=workspace, model=spec.model)
     env = os.environ.copy()
     if spec.name == "codex":
-        env.setdefault("WORKFLOW_CODEX_SANDBOX", "read-only")
+        env.setdefault("WORKFLOW_CODEX_SANDBOX", "workspace-write")
         env.setdefault("WORKFLOW_CODEX_BYPASS_APPROVALS", "0")
 
     try:
@@ -574,8 +579,14 @@ def evaluate_candidate(
 ) -> Path:
     candidate_id = str(candidate.get("id", "lesson-candidate"))
     safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", candidate_id).strip("-") or "lesson-candidate"
-    output_dir = workspace / "lesson_reviews" / f"{utc_stamp()}_{safe_id}"
-    output_dir.mkdir(parents=True, exist_ok=False)
+    output_root = workspace / "lesson_reviews"
+    output_root.mkdir(parents=True, exist_ok=True)
+    output_dir = output_root / f"{utc_stamp()}_{safe_id}"
+    suffix = 1
+    while output_dir.exists():
+        output_dir = output_root / f"{utc_stamp()}_{safe_id}_{suffix}"
+        suffix += 1
+    output_dir.mkdir()
 
     evidence_paths = candidate_source_paths(candidate, workspace)
     evidence_bundle = render_evidence_bundle(evidence_paths, DEFAULT_EVIDENCE_CHARS)
