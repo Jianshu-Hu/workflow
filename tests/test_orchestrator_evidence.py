@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import unittest
+import tempfile
+from pathlib import Path
 
 import orchestrator
+from utils.common import WorkflowPaths
+from utils.manifest import build_workflow_summary, render_plan_document
 
 
 class ExecutorEvidenceValidationTest(unittest.TestCase):
@@ -59,6 +63,36 @@ inconclusive - Verification still needs to be run.
             "Evidence contains incomplete-verification language such as skipped, not run, not applicable, or not tested without a terminal gate/blocker decision and concrete evidence.",
             issues,
         )
+
+
+class WorkflowSummaryRenderingTest(unittest.TestCase):
+    def test_done_workflow_with_failed_objective_mentions_unresolved_state(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            paths = WorkflowPaths(root=root)
+            manifest = {
+                "task": "test task",
+                "status": "done",
+                "current_step": None,
+                "workflow_outcome": "fail",
+                "workflow_outcome_reason": "Approved steps remain unresolved with outcome fail: full-robotwin-eval.",
+                "steps": [
+                    {
+                        "id": "full-robotwin-eval",
+                        "title": "Full RoboTwin environment evaluation",
+                        "status": "approved",
+                        "outcome_status": "fail",
+                        "outcome_reason": "Evaluation completed without crashes, but success rate remained 0.0.",
+                        "implementation_summary": [],
+                    }
+                ],
+            }
+            root.joinpath("plan.md").write_text(render_plan_document(manifest), encoding="utf-8")
+
+            summary = build_workflow_summary(paths, summary_status="done")
+            self.assertIn("The workflow is complete, but the objective remains `fail`.", summary)
+            self.assertIn("Review `progress.md`, `results.md`, and `plan.md`", summary)
+            self.assertNotIn("No further workflow action is required.", summary)
 
 
 if __name__ == "__main__":

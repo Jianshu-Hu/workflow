@@ -20,11 +20,11 @@ lessons:
     confidence: 1
     reason_category: implementation_correction
     trigger_event: >
-      During the investigate_wm_evaluation workflow, evaluation could run
-      successfully while producing invalid robot policy behavior because training
-      normalized actions but checkpoints did not consistently provide action_mean
-      and action_std to evaluation, and normalized action outputs could be passed
-      to the environment instead of denormalized raw action targets. The workflow
+      A workflow run showed that evaluation could complete while still producing
+      invalid robot policy behavior because training normalized actions but
+      checkpoints did not consistently provide action_mean and action_std to
+      evaluation, and normalized action outputs could be passed to the
+      environment instead of denormalized raw action targets. The workflow
       repaired this by saving action statistics during training, loading them
       during evaluation, keeping model rollout in normalized action space, and
       denormalizing before environment execution.
@@ -51,16 +51,15 @@ lessons:
     evidence:
       - path: /home/jianshu/workspace/MambaController/workflow_runs/investigate_wm_evaluation/results.md
         claim: >
-          Workflow results describe fixes for saving action statistics during
-          training, loading action_mean and action_std during evaluation, keeping
-          rollout in normalized action space, and denormalizing before
-          execute_action_block.
+          Workflow results show the training/evaluation action-stat contract was
+          repaired by saving action statistics during training, loading them during
+          evaluation, and denormalizing only at environment execution.
       - path: /home/jianshu/workspace/MambaController/workflow_runs/investigate_wm_evaluation/discussion.md
         claim: >
-          Workflow discussion identified action-normalization contract drift as a
-          concrete evaluation failure mode.
+          Workflow discussion identified action-normalization contract drift as the
+          failure mode that motivated the fix.
       - path: /home/jianshu/workspace/MambaController/workflow_runs/investigate_wm_evaluation/lesson_reviews/20260525T123406Z_verify-train-eval-action-image-processing-parity/human_review.md
-        claim: Codex, Gemini, and Claude approved the narrowed lesson candidate.
+        claim: The candidate was independently reviewed and approved before promotion.
     falsification_conditions:
       - A recorded-sample parity test proves that training normalization and evaluation inverse-normalization round-trip actions within the expected tolerance
       - Training and evaluation are refactored to call the same shared, tested action transform contract
@@ -77,3 +76,65 @@ lessons:
       human: approved
     status: candidate
     created_at: "2026-05-25T20:12:45+08:00"
+  - id: validate-checkpoint-provenance-before-full-eval
+    title: Validate checkpoint provenance before full evaluation
+    confidence: 1
+    reason_category: workflow_mechanism_gap
+    trigger_event: >
+      A workflow run launched a live benchmark against the only available
+      corrected checkpoint, but that checkpoint was a one-step smoke-training
+      artifact (global_step=1, args.max_steps=1). The follow-up investigation
+      confirmed the full evaluation remained unsatisfied because no fully trained
+      checkpoint with action_mean and action_std was available locally.
+    claim: >
+      Before an expensive benchmark or live policy evaluation that consumes an
+      explicit checkpoint, the workflow should validate that the exact checkpoint
+      path exists, is the artifact the command will actually use, and has
+      acceptable provenance for the intended evaluation; otherwise the workflow
+      should branch to staging, remediation, or a blocked state instead of
+      spending compute on a known-smoke artifact.
+    applies_when:
+      - A step or downstream command requires an explicit checkpoint, model snapshot, or similar artifact path
+      - The workflow is about to run a full benchmark, live environment evaluation, or other expensive closed-loop validation
+      - The checkpoint may come from a prior training or retraining step and could be a smoke artifact, partial run, or otherwise insufficient for the benchmark
+    does_not_apply_when:
+      - The workflow does not consume a checkpoint or other explicit artifact path
+      - The evaluation is purely offline and does not depend on a specific persisted model artifact
+      - The same command has already validated the exact checkpoint path and provenance in a prior readiness gate in the same workflow run
+    required_checks:
+      - Confirm the explicit checkpoint path exists and is the exact file passed to the benchmark command
+      - Load the checkpoint and record provenance fields chosen for the artifact type and intended evaluation, such as global_step, embedded args, and required action statistics or metadata
+      - Reject or block downstream evaluation when the artifact is missing, silently substituted, or clearly only a smoke artifact for a full benchmark
+      - If no suitable checkpoint exists, document the blocker and route the workflow to staging or remediation instead of launching the full eval
+    evidence:
+      - path: /home/jianshu/workspace/MambaController/workflow_runs/investigate_wm_evaluation/results.md
+        claim: >
+          Workflow results show the full benchmark and follow-up investigation both
+          used the same corrected checkpoint and still failed to reach a non-zero
+          success rate.
+      - path: /home/jianshu/workspace/MambaController/workflow_runs/investigate_wm_evaluation/results.md
+        claim: >
+          Workflow results record that checkpoint inspection exposed smoke-training
+          provenance rather than a fully trained model.
+      - path: /home/jianshu/workspace/MambaController/workflow_runs/investigate_wm_evaluation/summary.md
+        claim: >
+          The workflow summary records that the objective remained failed because no
+          fully trained checkpoint was available locally.
+      - path: /home/jianshu/workspace/MambaController/workflow_runs/investigate_wm_evaluation/lesson_reviews/20260526T030350Z_validate-checkpoint-provenance-before-full-eval/human_review.md
+        claim: The review packet records approval from all three model reviewers and the human.
+    falsification_conditions:
+      - A future run validates the exact checkpoint path, provenance, and suitability before the expensive benchmark and does not waste compute on a smoke artifact
+      - The workflow stages or downloads a fully trained checkpoint through repository-owned automation before launching the benchmark
+      - The evaluation flow is refactored so the benchmark cannot run unless a prior gate proves the artifact provenance and training maturity
+    review_required:
+      - codex
+      - claude
+      - gemini
+      - human
+    reviews:
+      codex: approved
+      claude: approved
+      gemini: approved
+      human: approved
+    status: candidate
+    created_at: "2026-05-26T03:05:00+00:00"

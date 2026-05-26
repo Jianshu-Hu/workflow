@@ -1021,7 +1021,15 @@ def build_workflow_summary(
             )
 
     if summary_status == SUMMARY_STATUS_DONE:
-        next_steps.append("- No further workflow action is required.")
+        if workflow_outcome == "pass":
+            next_steps.append("- No further workflow action is required.")
+        else:
+            next_steps.append(
+                f"- The workflow is complete, but the objective remains `{workflow_outcome}`."
+            )
+            next_steps.append(
+                f"- Review `{paths.progress_md.name}`, `{paths.results_md.name}`, and `{paths.plan_md.name}` for the decisive blocker or unresolved outcome."
+            )
         next_steps.append(
             f"- Inspect `{paths.results_md.name}` and `{paths.plan_md.name}` for the final detailed record."
         )
