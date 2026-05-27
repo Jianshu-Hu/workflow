@@ -80,6 +80,12 @@ MIGRATION_PROMPT_CHARS = 20000
 EXECUTOR_INCOMPLETE_STDOUT_CHARS = 8000
 EXECUTOR_INCOMPLETE_STDERR_CHARS = 16000
 EXECUTOR_EVIDENCE_REPORT_CHARS = 12000
+CANONICAL_CONTRACT_REQUIREMENTS = """Canonical contract requirements for declared external contracts:
+- When the user or plan names a specific contract, such as a format version, schema, dataset layout, file format, model interface, API contract, CLI behavior, benchmark protocol, or compatibility target, the plan must include acceptance criteria and verification that prove compatibility with that exact contract.
+- Prefer the canonical local reader, writer, validator, public API, or downstream command from the dependency or repository over filename, column-name, or hand-written metadata checks. If no canonical validator exists, explicitly justify the substitute checks and include contract-specific fields that distinguish the requested target from nearby legacy, partial, or adjacent contracts.
+- Verification should load or consume the produced artifact through the same public API or command downstream users are expected to use. A file-presence check is not sufficient for a declared compatibility claim.
+- If implementation discovers that the produced artifact or behavior only matches a legacy, partial, or adjacent contract, repair the producer or mark the step failed/inconclusive. Do not make downstream code bypass the canonical consumer merely to accept the wrong artifact or behavior unless the user explicitly changes the target contract.
+- Review must reject a step that claims compatibility with a declared external contract but only proves superficial structure, or that adapts downstream code around an incompatible artifact or behavior instead of satisfying the requested contract."""
 EXECUTOR_REQUIRED_EVIDENCE_HEADINGS = (
     "Acceptance Evidence",
     "Verification Evidence",
@@ -1174,6 +1180,7 @@ Requirements:
 - If remediation requires debugging the workflow itself, add explicit repair or diagnostic steps rather than treating the issue as a permanent external blocker.
 - For expensive benchmark or evaluation workflows, add a cheap readiness gate before the full run whenever possible. Set `blocks_downstream_on_fail: true` on smoke tests, replay audits, or one-episode validations that should prevent later full evaluation steps after a failed outcome.
 - Before a full evaluation, include concrete domain-appropriate readiness checks that prove the inputs, environment, and measured artifact match the benchmark command. For policy-learning tasks, this includes expert replay from stored initial states, restored observations/agent_pos matching processed samples, explicit checkpoint/data path validation, and teacher-forced action error low enough to justify closed-loop evaluation.
+- Apply the canonical contract requirements below. If a task names a contract such as a format version, schema, dataset layout, file format, model interface, API contract, CLI behavior, benchmark protocol, or compatibility target, create acceptance criteria and verification that prove that exact contract through the canonical local consumer, validator, API, or downstream command, not only by checking file names or superficial fields.
 - Prefer workflow-owned helper scripts and artifacts under the actual workflow root `{paths.root}` when automation glue is needed.
 - Use the exact workflow root `{paths.root}` in all implementation and verification paths. Do not invent, create, symlink, or reference a repo-root `workflow_workspace` alias.
 - If a failure is caused by missing public checkpoints, datasets, assets, or packages and the repository already documents or scripts how to acquire them, treat that as workflow work. Add an explicit prerequisite-staging or cache-population step instead of immediately requiring human intervention.
@@ -1193,6 +1200,8 @@ Workflow-level lessons:
 ```text
 {lessons_text}
 ```
+
+{CANONICAL_CONTRACT_REQUIREMENTS}
 
 Path placeholders:
 - `{{workspace}}`: {paths.root}
@@ -1497,6 +1506,7 @@ Required behavior:
 - If verification fails because a public prerequisite is missing but the repository contains a documented or scriptable way to fetch or materialize it, implement that prerequisite staging in the workflow and rerun instead of treating it as immediate operator work.
 - Prefer committed, idempotent setup helpers over one-off shell history. If a prerequisite is large, make the setup resumable and cache-aware so later workflow runs do not repeat the download or extraction.
 - Reserve requests for human intervention for cases that truly require operator action outside the repository, such as missing permissions, credentials, cluster allocation, or external services you cannot control.
+- Apply the canonical contract requirements below. When this step produces or changes an artifact or behavior with a declared external contract, run the canonical local consumer, validator, API, or downstream command expected by users and record that evidence. If it only works after bypassing the canonical consumer or changing downstream code to accept an incompatible legacy, partial, or adjacent contract, mark the step failed or inconclusive and explain the mismatch instead of presenting the workaround as success.
 - Apply selected workflow-level lessons only when their stated scope matches the current step. If a lesson requires checks relevant to this step, perform them or record concrete evidence explaining why they do not apply.
 - Append a new section to `{paths.results_md}` titled `Step {step['id']} - {step['title']}`.
 - In that section include these exact third-level subsections:
@@ -1514,6 +1524,8 @@ Current workflow progress:
 ```markdown
 {progress_text.strip()}
 ```
+
+{CANONICAL_CONTRACT_REQUIREMENTS}
 
 Current workflow manifest:
 ```yaml
@@ -1573,6 +1585,8 @@ Workflow-level lessons:
 {lessons_text}
 ```
 
+{CANONICAL_CONTRACT_REQUIREMENTS}
+
 Return JSON only with this schema:
 {{
   "approved": true or false,
@@ -1616,6 +1630,8 @@ Reject if any acceptance criterion or verification requirement lacks specific ev
 Reject if command-based verification lacks an exit/return code, unless the result section explains why no command was applicable for that requirement.
 Reject if required verification is described as still running, skipped, not tested, or to be verified later.
 Reject if the step relies on an explicitly requested checkpoint, dataset, log, or other artifact path but the result section does not show that the explicit path was validated or used, or if the implementation silently falls back to a default artifact after an explicit path is missing.
+Reject if the step claims compatibility with a declared external contract, such as a format version, schema, dataset layout, file format, model interface, API contract, CLI behavior, benchmark protocol, or compatibility target, but the evidence only checks filenames, hand-written metadata, column names, or other superficial structure instead of the canonical local consumer, validator, API, or downstream command expected by users.
+Reject if downstream code was changed to bypass the canonical consumer/API and accept an incompatible legacy, partial, or adjacent artifact or behavior, unless the plan explicitly changed the target contract and the result section documents that change as an intentional outcome.
 Set `outcome_status` to `pass` when the step completed and achieved its intended outcome, `fail` when the step executed but the measured outcome is unacceptable, and `inconclusive` when the step completed but the result cannot yet be judged confidently.
 If any acceptance criterion is unmet, do not use `outcome_status=pass`; either reject the step or approve it with `outcome_status=fail` / `inconclusive` so follow-up work remains visible.
 Use `approved=true` with `outcome_status=fail` when the workflow should continue but the poor result must remain visible as a follow-on issue instead of blocking step completion.
