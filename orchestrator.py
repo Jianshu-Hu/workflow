@@ -2110,13 +2110,27 @@ def parse_review_json(raw_output: str) -> StepResult:
     if not stripped:
         raise WorkflowError("Reviewer returned empty output.")
 
+    payload: Any
     try:
         payload = json.loads(stripped)
-    except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", stripped, re.DOTALL)
-        if not match:
-            raise WorkflowError("Reviewer output did not contain parseable JSON.")
-        payload = json.loads(match.group(0))
+    except json.JSONDecodeError as full_exc:
+        decoder = json.JSONDecoder()
+        candidates = [match.start() for match in re.finditer(r"\{", stripped)]
+        parse_errors: list[str] = [str(full_exc)]
+        payload = None
+        for start in candidates:
+            try:
+                candidate, end = decoder.raw_decode(stripped[start:])
+            except json.JSONDecodeError as exc:
+                parse_errors.append(str(exc))
+                continue
+            if stripped[start + end :].strip():
+                parse_errors.append("reviewer output contains non-JSON text after the first JSON object")
+            payload = candidate
+            break
+        if payload is None:
+            detail = parse_errors[-1] if parse_errors else "unknown JSON parse error"
+            raise WorkflowError(f"Reviewer output did not contain parseable JSON: {detail}") from full_exc
 
     if not isinstance(payload, dict):
         raise WorkflowError("Reviewer JSON must be an object.")

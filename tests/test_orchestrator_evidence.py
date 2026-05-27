@@ -65,6 +65,28 @@ inconclusive - Verification still needs to be run.
         )
 
 
+class ReviewJsonParsingTest(unittest.TestCase):
+    def test_parse_review_json_accepts_json_with_trailing_text(self) -> None:
+        raw_output = """
+{"approved": true, "outcome_status": "pass", "outcome_reason": "ok", "summary": "done", "required_changes": [], "human_intervention_required": false, "human_intervention_reason": ""}
+extra reviewer commentary
+"""
+
+        result = orchestrator.parse_review_json(raw_output)
+
+        self.assertTrue(result.approved)
+        self.assertEqual(result.outcome_status, "pass")
+        self.assertEqual(result.summary, "done")
+
+    def test_parse_review_json_reports_unparseable_json_as_workflow_error(self) -> None:
+        raw_output = "reviewer said: {not valid json}"
+
+        with self.assertRaises(orchestrator.WorkflowError) as ctx:
+            orchestrator.parse_review_json(raw_output)
+
+        self.assertIn("Reviewer output did not contain parseable JSON", str(ctx.exception))
+
+
 class WorkflowSummaryRenderingTest(unittest.TestCase):
     def test_done_workflow_with_failed_objective_mentions_unresolved_state(self) -> None:
         with tempfile.TemporaryDirectory() as td:
