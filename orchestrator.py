@@ -86,6 +86,16 @@ CANONICAL_CONTRACT_REQUIREMENTS = """Canonical contract requirements for declare
 - Verification should load or consume the produced artifact through the same public API or command downstream users are expected to use. A file-presence check is not sufficient for a declared compatibility claim.
 - If implementation discovers that the produced artifact or behavior only matches a legacy, partial, or adjacent contract, repair the producer or mark the step failed/inconclusive. Do not make downstream code bypass the canonical consumer merely to accept the wrong artifact or behavior unless the user explicitly changes the target contract.
 - Review must reject a step that claims compatibility with a declared external contract but only proves superficial structure, or that adapts downstream code around an incompatible artifact or behavior instead of satisfying the requested contract."""
+REPRODUCTION_PROTOCOL_REQUIREMENTS = """Reproduction and benchmark protocol requirements:
+- When a workflow claims a paper reproduction, baseline reproduction, benchmark reproduction, or paper-scale training result, the plan must identify the original protocol/configuration before accepting the result. This includes the source of truth for settings, hyperparameters, command-line arguments, seeds, environment/task version, dataset/checkpoint provenance, wrappers, reward terms, preprocessing, evaluation protocol, hardware-relevant knobs, and intended training budget.
+- Reproduction plans must include a config/settings parity check against the original source of truth. Record each setting as exact match, justified unavoidable substitution, unknown, or deviation. A run with unknown or deviating settings may be accepted only as an approximate reproduction, ablation, port, smoke test, truncated baseline, partial baseline, or inconclusive result unless the user explicitly changes the target contract.
+- For iterative RL/training runs, record the declared schedule fields and derived budget, such as `total_iters`, `n_steps`, `num_envs`, expected environment steps, `max_steps`, eval cadence, seeds, and any early-stop condition.
+- Verification evidence for a reproduced training run must record both the configured budget and the realized budget from logs or artifacts, including final timesteps/environment steps, completed iterations/evaluation rows, best and last metrics, and whether the run ended by intended completion, explicit early stop, failure, timeout, or an unrelated cap.
+- If two controls conflict, such as `--total-iters` implying a much larger schedule than `--max-steps`, the workflow must resolve the intended protocol from source, scripts, paper text, or user direction before labeling the result as a faithful reproduction.
+- Treat any unplanned cap, timeout, early stop, failed resume, or realized budget meaningfully below the intended protocol as material unless the workflow records and justifies a domain-specific threshold. When no threshold is available, label the result approximate, truncated, partial, or inconclusive rather than faithful.
+- A shortened run may be accepted only as a smoke test, truncated baseline, partial baseline, or inconclusive result unless acceptance criteria explicitly define that shorter budget as the target protocol.
+- These requirements do not apply to a new local baseline under a declared custom budget when the task does not claim faithful paper, benchmark, or original-baseline comparability.
+- Review must reject or downgrade a claimed reproduction when settings parity is unproven, settings deviate from the original protocol, or the run consumed materially less budget than the declared or apparent protocol, even if the measured metric looks plausible or passes a weak threshold."""
 EXECUTOR_REQUIRED_EVIDENCE_HEADINGS = (
     "Acceptance Evidence",
     "Verification Evidence",
@@ -1181,6 +1191,7 @@ Requirements:
 - For expensive benchmark or evaluation workflows, add a cheap readiness gate before the full run whenever possible. Set `blocks_downstream_on_fail: true` on smoke tests, replay audits, or one-episode validations that should prevent later full evaluation steps after a failed outcome.
 - Before a full evaluation, include concrete domain-appropriate readiness checks that prove the inputs, environment, and measured artifact match the benchmark command. For policy-learning tasks, this includes expert replay from stored initial states, restored observations/agent_pos matching processed samples, explicit checkpoint/data path validation, and teacher-forced action error low enough to justify closed-loop evaluation.
 - Apply the canonical contract requirements below. If a task names a contract such as a format version, schema, dataset layout, file format, model interface, API contract, CLI behavior, benchmark protocol, or compatibility target, create acceptance criteria and verification that prove that exact contract through the canonical local consumer, validator, API, or downstream command, not only by checking file names or superficial fields.
+- Apply the reproduction and benchmark protocol requirements below. If the task asks for a reproduction, baseline reproduction, benchmark comparison, paper-scale run, or training result, create acceptance criteria and verification that compare the original settings/configuration against the actual command/config and compare the intended protocol budget against the realized run budget before accepting the result as faithful.
 - Prefer workflow-owned helper scripts and artifacts under the actual workflow root `{paths.root}` when automation glue is needed.
 - Use the exact workflow root `{paths.root}` in all implementation and verification paths. Do not invent, create, symlink, or reference a repo-root `workflow_workspace` alias.
 - If a failure is caused by missing public checkpoints, datasets, assets, or packages and the repository already documents or scripts how to acquire them, treat that as workflow work. Add an explicit prerequisite-staging or cache-population step instead of immediately requiring human intervention.
@@ -1202,6 +1213,8 @@ Workflow-level lessons:
 ```
 
 {CANONICAL_CONTRACT_REQUIREMENTS}
+
+{REPRODUCTION_PROTOCOL_REQUIREMENTS}
 
 Path placeholders:
 - `{{workspace}}`: {paths.root}
@@ -1507,6 +1520,7 @@ Required behavior:
 - Prefer committed, idempotent setup helpers over one-off shell history. If a prerequisite is large, make the setup resumable and cache-aware so later workflow runs do not repeat the download or extraction.
 - Reserve requests for human intervention for cases that truly require operator action outside the repository, such as missing permissions, credentials, cluster allocation, or external services you cannot control.
 - Apply the canonical contract requirements below. When this step produces or changes an artifact or behavior with a declared external contract, run the canonical local consumer, validator, API, or downstream command expected by users and record that evidence. If it only works after bypassing the canonical consumer or changing downstream code to accept an incompatible legacy, partial, or adjacent contract, mark the step failed or inconclusive and explain the mismatch instead of presenting the workaround as success.
+- Apply the reproduction and benchmark protocol requirements below. When this step trains, evaluates, or accepts a claimed reproduction/baseline/benchmark result, record original-vs-actual config/settings parity plus the intended run budget and realized run budget. If settings parity is unproven or the realized run is materially shorter than the intended protocol, mark it as an approximate reproduction, ablation, port, smoke test, truncated baseline, partial baseline, or inconclusive result rather than a faithful reproduction.
 - Apply selected workflow-level lessons only when their stated scope matches the current step. If a lesson requires checks relevant to this step, perform them or record concrete evidence explaining why they do not apply.
 - Append a new section to `{paths.results_md}` titled `Step {step['id']} - {step['title']}`.
 - In that section include these exact third-level subsections:
@@ -1526,6 +1540,8 @@ Current workflow progress:
 ```
 
 {CANONICAL_CONTRACT_REQUIREMENTS}
+
+{REPRODUCTION_PROTOCOL_REQUIREMENTS}
 
 Current workflow manifest:
 ```yaml
@@ -1587,6 +1603,8 @@ Workflow-level lessons:
 
 {CANONICAL_CONTRACT_REQUIREMENTS}
 
+{REPRODUCTION_PROTOCOL_REQUIREMENTS}
+
 Return JSON only with this schema:
 {{
   "approved": true or false,
@@ -1632,6 +1650,8 @@ Reject if required verification is described as still running, skipped, not test
 Reject if the step relies on an explicitly requested checkpoint, dataset, log, or other artifact path but the result section does not show that the explicit path was validated or used, or if the implementation silently falls back to a default artifact after an explicit path is missing.
 Reject if the step claims compatibility with a declared external contract, such as a format version, schema, dataset layout, file format, model interface, API contract, CLI behavior, benchmark protocol, or compatibility target, but the evidence only checks filenames, hand-written metadata, column names, or other superficial structure instead of the canonical local consumer, validator, API, or downstream command expected by users.
 Reject if downstream code was changed to bypass the canonical consumer/API and accept an incompatible legacy, partial, or adjacent artifact or behavior, unless the plan explicitly changed the target contract and the result section documents that change as an intentional outcome.
+Reject or downgrade to `outcome_status=fail`/`inconclusive` if a step claims a faithful reproduction, baseline reproduction, benchmark reproduction, or paper-scale training result but the evidence does not compare original settings/configuration against the actual command/config and compare intended protocol budget against realized run budget.
+Reject or downgrade to `outcome_status=fail`/`inconclusive` if original settings parity is unproven, settings deviate from the original protocol, or the realized run budget is materially shorter than the declared or apparent protocol because of `max_steps`, timeout, early stop, smoke settings, failed continuation, or conflicting schedule fields, unless the step explicitly scoped the outcome as an approximate reproduction, ablation, port, smoke test, truncated baseline, partial baseline, or short-budget diagnostic.
 Set `outcome_status` to `pass` when the step completed and achieved its intended outcome, `fail` when the step executed but the measured outcome is unacceptable, and `inconclusive` when the step completed but the result cannot yet be judged confidently.
 If any acceptance criterion is unmet, do not use `outcome_status=pass`; either reject the step or approve it with `outcome_status=fail` / `inconclusive` so follow-up work remains visible.
 Use `approved=true` with `outcome_status=fail` when the workflow should continue but the poor result must remain visible as a follow-on issue instead of blocking step completion.

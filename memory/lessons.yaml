@@ -138,3 +138,94 @@ lessons:
       human: approved
     status: candidate
     created_at: "2026-05-26T03:05:00+00:00"
+  - id: validate-reproduction-config-and-training-budget
+    title: Validate reproduction config and training budget before accepting baselines
+    confidence: 1
+    reason_category: workflow_mechanism_gap
+    trigger_terms:
+      - reproduction
+      - reproduce
+      - baseline
+      - benchmark
+      - paper-scale
+      - paper reproduction
+      - benchmark reproduction
+      - config parity
+      - settings parity
+      - hyperparameters
+      - training budget
+      - environment steps
+      - max_steps
+      - total_iters
+      - early stop
+      - timeout
+    trigger_event: >
+      A reviewed workflow lesson candidate showed that a workflow can accept and
+      reuse a training/evaluation metric as a reproduction or benchmark-comparable
+      baseline even when the acceptance evidence proves only that the run
+      completed and produced a final metric. The reusable failure mode is a
+      review/planning gap: faithful reproduction claims require original-vs-actual
+      settings parity and intended-vs-realized budget evidence, not just a
+      plausible metric.
+    claim: >
+      For reproduction or benchmark-comparable baseline workflows, the workflow
+      must validate original-vs-actual configuration parity and
+      intended-vs-realized protocol budget before labeling a result as a faithful
+      reproduction or comparable baseline. A metric from a run with unproven or
+      deviating settings, conflicting schedule controls, an unplanned cap, a
+      timeout, an early stop, a failed resume, or a materially shortened realized
+      budget should be recorded as an approximate reproduction, ablation, port,
+      smoke test, truncated baseline, partial baseline, custom local baseline, or
+      inconclusive result unless that changed protocol was explicitly defined as
+      the target before running.
+    applies_when:
+      - A task asks for a paper reproduction, baseline reproduction, benchmark reproduction, paper-scale run, or benchmark-comparable baseline
+      - A result will be compared against a paper, published benchmark, external baseline, original implementation, or prior claimed reproduction
+      - Training or evaluation has schedule controls such as total iterations, max steps, rollout length, number of environments, evaluation cadence, seeds, early stopping, timeout, or resume behavior
+      - Reproduction depends on original settings such as hyperparameters, task/environment version, wrappers, reward terms, preprocessing, seeds, datasets, checkpoints, hardware-relevant knobs, or evaluation protocol
+      - CLI arguments, scripts, config files, source-code defaults, logs, checkpoint metadata, or run summaries may disagree about the intended amount of training or evaluation
+    does_not_apply_when:
+      - The step is explicitly scoped as a smoke test, short-budget diagnostic, API check, or exploratory run and does not claim benchmark comparability
+      - The task intentionally defines a new local baseline under a declared custom budget before running and does not claim faithful paper, benchmark, or original-baseline comparability
+      - The benchmark protocol is non-iterative and has no meaningful train/eval budget, early-stop, timeout, resume, or configuration-parity dimension
+      - Prior verified evidence in the same workflow already records original-vs-actual settings parity, intended budget, realized budget, termination reason, and comparability decision for the exact artifact
+    required_checks:
+      - Extract the original protocol/configuration from paper text, repository scripts, configs, user direction, source code, or benchmark documentation, including hyperparameters, task/environment version, wrappers, reward terms, preprocessing, seeds, datasets/checkpoints, hardware-relevant knobs, evaluation protocol, and schedule fields such as total iterations, rollout length, number of environments, max steps, eval cadence, and resume or early-stop rules
+      - Build an original-vs-actual settings parity table or equivalent structured evidence, marking each important setting as exact match, justified unavoidable substitution, unknown, or deviation
+      - Compute derived training/evaluation budget where applicable, such as iterations times rollout length times environment count for vectorized RL schedules, and compare it with caps such as max_steps, timeouts, early stopping, or resume state
+      - Inspect logs, metrics CSVs, checkpoint metadata, stdout, scheduler output, or run summaries to record realized environment steps/timesteps, completed iterations or evaluation rows, best and last metrics, and termination reason
+      - Treat any unplanned cap, timeout, early stop, failed resume, or realized budget meaningfully below the intended protocol as material unless the workflow records and justifies a domain-specific threshold; when no threshold is available, label the result approximate, truncated, partial, custom-baseline, or inconclusive rather than faithful
+      - If settings are unknown/deviating, controls conflict, or the realized run is materially shorter than the apparent protocol, resolve the protocol before acceptance or label the result as approximate/truncated/partial/custom/inconclusive instead of a faithful reproduction
+      - Record the settings parity, budget comparison, and comparability decision in acceptance and verification evidence, not only the final metric
+    evidence:
+      - path: /home/jianshu/workspace/pianomime/workflow_runs/reproduce_results/lesson_candidates.yaml
+        claim: >
+          Workspace-local lesson candidate records the concrete trigger and the
+          generalized required checks for reproduction config and budget parity.
+      - path: /home/jianshu/workspace/pianomime/workflow_runs/reproduce_results/lesson_reviews/20260604T105632Z_validate-reproduction-config-and-training-budget/human_review.md
+        claim: >
+          Review packet records that Codex, Gemini, and Claude approved the
+          candidate; the suggested human action allows promotion to confidence 1
+          as a low-confidence active advisory after evidence review.
+      - path: /home/jianshu/workspace/pianomime/workflow_runs/reproduce_results/results.md
+        claim: >
+          Source workflow evidence shows a baseline metric was accepted and reused
+          for comparison using completion/metric evidence without a prior
+          original-vs-actual settings parity and budget-comparability gate.
+    falsification_conditions:
+      - The task is explicitly a local custom-baseline, smoke, diagnostic, or exploratory run and does not claim faithful reproduction or benchmark comparability
+      - The workflow records original-vs-actual settings parity, intended budget, realized budget, termination reason, and comparability decision before accepting the reproduction or comparable baseline
+      - A canonical benchmark harness or repository-owned gate enforces config parity and fails on unknown/deviating settings, conflicting schedule controls, unplanned caps, timeouts, early stops, or failed resumes before metrics can be labeled faithful or comparable
+      - Budget controls are refactored so one source of truth derives the rest or fails on disagreement; this only satisfies the budget-control portion for that code path, and configuration parity is still required when comparability is claimed
+    review_required:
+      - codex
+      - claude
+      - gemini
+      - human
+    reviews:
+      codex: approved
+      claude: approved
+      gemini: approved
+      human: approved
+    status: candidate
+    created_at: "2026-06-04T00:00:00+00:00"
